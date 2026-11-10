@@ -1,0 +1,56 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Spine Faster Export",
+  "version": "0.1.0",
+  "identifier": "com.nkstudio.spine-faster-export",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Spine Faster Export",
+        "width": 940,
+        "height": 620,
+        "minWidth": 820,
+        "minHeight": 540,
+        "dragDropEnabled": true,
+        "backgroundColor": "#181a1c"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "Spine 프로젝트 빠른 내보내기",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["spine"],
+        "name": "Spine Project",
+        "description": "Spine 프로젝트",
+        "role": "Viewer"
+      }
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
+    "windows": {
+      "nsis": { "installMode": "currentUser" }
+    }
+  }
+}

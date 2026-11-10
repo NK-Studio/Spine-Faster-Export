@@ -1,0 +1,24 @@
+[package]
+name = "spine-faster-export"
+description = "Spine 프로젝트(.spine)를 빠르게 내보내는 도구"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "spine_faster_export_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+spine-export.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "2"

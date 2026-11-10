@@ -1,0 +1,18 @@
+[package]
+name = "spine-export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+spine-model.workspace = true
+spine-project.workspace = true
+spine-json.workspace = true
+spine-atlas.workspace = true
+spine-binary.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+
+[[bin]]
+name = "spine-export-cli"
+path = "src/bin/cli.rs"

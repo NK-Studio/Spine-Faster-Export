@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/spine-model",
+    "crates/spine-project",
+    "crates/spine-json",
+    "crates/spine-atlas",
+    "crates/spine-binary",
+    "crates/spine-export",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+spine-model = { path = "crates/spine-model" }
+spine-project = { path = "crates/spine-project" }
+spine-json = { path = "crates/spine-json" }
+spine-atlas = { path = "crates/spine-atlas" }
+spine-binary = { path = "crates/spine-binary" }
+spine-export = { path = "crates/spine-export" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2

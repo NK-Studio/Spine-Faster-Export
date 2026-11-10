@@ -1,0 +1,29 @@
+/* IBM Plex Sans KR (SIL OFL 1.1, src/assets/fonts/ibm-plex-sans-kr/OFL.txt). 앱이 쓰는 굵기만 싣는다. */
+@font-face {
+  font-family: "IBM Plex Sans KR";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("./assets/fonts/ibm-plex-sans-kr/IBMPlexSansKR-Regular.ttf") format("truetype");
+}
+@font-face {
+  font-family: "IBM Plex Sans KR";
+  font-style: normal;
+  font-weight: 500;
+  font-display: block;
+  src: url("./assets/fonts/ibm-plex-sans-kr/IBMPlexSansKR-Medium.ttf") format("truetype");
+}
+@font-face {
+  font-family: "IBM Plex Sans KR";
+  font-style: normal;
+  font-weight: 600;
+  font-display: block;
+  src: url("./assets/fonts/ibm-plex-sans-kr/IBMPlexSansKR-SemiBold.ttf") format("truetype");
+}
+@font-face {
+  font-family: "IBM Plex Sans KR";
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url("./assets/fonts/ibm-plex-sans-kr/IBMPlexSansKR-Bold.ttf") format("truetype");
+}

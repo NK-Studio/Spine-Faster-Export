@@ -1,0 +1,10 @@
+[package]
+name = "spine-project"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+spine-model.workspace = true
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+serde_json.workspace = true

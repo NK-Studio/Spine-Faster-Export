@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);CS0162;CS0168;CS0219;CS0414;CS0649;CS8632</NoWarn>
+    <RootNamespace>Oracle</RootNamespace>
+    <!-- com.nkstudio.spine-event-injector 패키지 폴더: dotnet run -p:SpineInjector=/path/to/com.nkstudio.spine-event-injector
+         또는 환경 변수 SPINE_INJECTOR -->
+    <SpineInjector Condition="'$(SpineInjector)' == ''">$(SPINE_INJECTOR)</SpineInjector>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(SpineInjector)/Editor/Core/**/*.cs" />
+    <Compile Include="$(SpineInjector)/Editor/SpineVersionConverter/**/*.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
+  </ItemGroup>
+</Project>
