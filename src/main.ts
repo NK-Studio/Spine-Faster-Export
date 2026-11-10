@@ -579,6 +579,18 @@ const pathBox = (value: string | null, placeholder: string) =>
 const check = (id: string, label: string, on: boolean, enabled = true, hint = "") =>
   `<label class="check${enabled ? "" : " disabled"}"${hint ? ` title="${esc(hint)}"` : ""}><input type="checkbox" class="tri-check" id="${id}" ${on ? "checked" : ""} ${enabled ? "" : "disabled"}/>${label}</label>`;
 const select = (id: string, values: [string, string][], cur: string, enabled = true, tip = "", def?: string) => selectHtml(`id="${id}"`, values, cur, enabled, tip, def);
+const lbl = (text: string, tip = "") => `<span class="lbl"${tip ? ` title="${esc(tip)}"` : ""}>${text}:</span>`;
+
+// 호버 툴팁. 한 줄로 짧게, "이게 뭔지"만 적는다.
+const TIPS = {
+  out: "내보낸 파일을 둘 폴더",
+  version: "게임의 Spine 런타임 버전과 맞추세요",
+  format: "JSON: 읽기 쉬움 · 바이너리: 작고 빠름",
+  ness: "에디터로 다시 가져올 때만 쓰는 데이터. 런타임에는 필요 없습니다",
+  skelExt: ".skel.bytes 는 Unity 용",
+  jsonFormat: "JSON 을 쓰는 문법(따옴표 생략 정도)",
+  jsonExt: "스켈레톤 JSON 파일의 확장자",
+};
 
 // ───────────────────────────────────────── 런타임 버전
 
@@ -665,8 +677,8 @@ function applyProjectState() {
 function renderSettings() {
   const o = options;
   const ness = o.nonessential === null ? "auto" : o.nonessential ? "on" : "off";
-  const seg = (attr: string, items: [string, string][], cur: string) =>
-    `<div class="view-switch">${items.map(([v, l]) => `<button data-${attr}="${v}" class="${v === cur ? "on" : ""}">${l}</button>`).join("")}</div>`;
+  const seg = (attr: string, items: [string, string][], cur: string, tip = "") =>
+    `<div class="view-switch"${tip ? ` title="${esc(tip)}"` : ""}>${items.map(([v, l]) => `<button data-${attr}="${v}" class="${v === cur ? "on" : ""}">${l}</button>`).join("")}</div>`;
   const a = o.atlas;
   const tab = TABS.some(([k]) => k === prefs.tab) ? prefs.tab : "out";
   const vs = versionState();
@@ -684,16 +696,16 @@ function renderSettings() {
     ${pane(
       "out",
       `<div class="form">
-        <span class="lbl">폴더:</span>
+        ${lbl("폴더", TIPS.out)}
         <div class="stack">
-          ${seg("out", [["beside", "프로젝트 옆 export"], ["custom", "직접 지정"]], prefs.outMode)}
+          ${seg("out", [["beside", "프로젝트 옆 export"], ["custom", "직접 지정"]], prefs.outMode, TIPS.out)}
           <div class="row">${pathBox(outDir(), "프로젝트를 열면 정해집니다")}<button class="btn icon" id="btn-out" title="폴더 고르기">${icons.folder}</button></div>
         </div>
-        <span class="lbl">런타임 버전:</span>
+        ${lbl("런타임 버전", TIPS.version)}
         <div class="stack">
           <div class="row">
             <span class="combo${vs.kind === "unsupported" || vs.kind === "invalid" ? " invalid" : ""}">
-              <input type="text" class="field mono" id="opt-version" spellcheck="false" autocomplete="off" value="${esc(o.version)}"
+              <input type="text" class="field mono" id="opt-version" spellcheck="false" autocomplete="off" title="${esc(TIPS.version)}" value="${esc(o.version)}"
                 placeholder="프로젝트 버전 따름${project ? ` (${esc(project.formatVersion)})` : ""}" aria-describedby="version-note" />
               <button class="combo-btn" id="btn-version-list" tabindex="-1" title="버전 목록" aria-label="버전 목록"></button>
             </span>
@@ -707,21 +719,21 @@ function renderSettings() {
     ${pane(
       "skel",
       `<div class="form">
-        <span class="lbl">형식:</span>
-        ${seg("fmt", [["json", "JSON"], ["binary", "바이너리"], ["both", "둘 다"]], o.format)}
-        <span class="lbl">비필수 데이터:</span>
-        ${select("opt-ness", [["auto", "자동 (JSON 포함 · 바이너리 제외)"], ["on", "포함"], ["off", "제외"]], ness, true, "", "auto")}
+        ${lbl("형식", TIPS.format)}
+        ${seg("fmt", [["json", "JSON"], ["binary", "바이너리"], ["both", "둘 다"]], o.format, TIPS.format)}
+        ${lbl("비필수 데이터", TIPS.ness)}
+        ${select("opt-ness", [["auto", "자동 (JSON 포함 · 바이너리 제외)"], ["on", "포함"], ["off", "제외"]], ness, true, TIPS.ness, "auto")}
         ${
           o.format === "json"
             ? ""
-            : `<span class="lbl">바이너리 확장자:</span>
+            : `${lbl("바이너리 확장자", TIPS.skelExt)}
         <div class="stack">
           ${select(
             "opt-skel-ext",
             [[".skel", ".skel"], [".skel.bytes", ".skel.bytes"]],
             o.skelExt,
             !o.unity,
-            o.unity ? "Unity(spine-unity) 형식이 켜져 있어 .skel.bytes 로 고정됩니다. 팩 설정의 Options 에서 끌 수 있습니다" : "",
+            o.unity ? "Unity(spine-unity) 형식이 켜져 있어 .skel.bytes 로 고정됩니다. 팩 설정의 Options 에서 끌 수 있습니다" : TIPS.skelExt,
           )}
           ${o.unity ? `<div class="hint">Unity(spine-unity) 형식이라 .skel.bytes 로 고정됩니다.</div>` : ""}
         </div>`
@@ -729,7 +741,7 @@ function renderSettings() {
         ${
           o.format === "binary"
             ? ""
-            : `<span class="lbl">JSON 형식:</span>
+            : `${lbl("JSON 형식", TIPS.jsonFormat)}
         <div class="row">
           ${select(
             "opt-json-format",
@@ -741,8 +753,8 @@ function renderSettings() {
           )}
           ${check("opt-pretty", "Pretty print", o.prettyPrint, true, "사람이 읽기 좋게 줄을 나눠 씁니다(파일이 조금 커집니다)")}
         </div>
-        <span class="lbl">JSON 확장자:</span>
-        <input type="text" class="field mono" id="opt-json-ext" spellcheck="false" autocomplete="off" value="${esc(o.jsonExt)}" placeholder=".json" style="max-width:140px" />`
+        ${lbl("JSON 확장자", TIPS.jsonExt)}
+        <input type="text" class="field mono" id="opt-json-ext" spellcheck="false" autocomplete="off" title="${esc(TIPS.jsonExt)}" value="${esc(o.jsonExt)}" placeholder=".json" style="max-width:140px" />`
         }
         <span class="lbl">출력:</span>
         <div class="stack">
