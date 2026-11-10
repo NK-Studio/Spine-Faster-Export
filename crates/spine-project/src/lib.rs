@@ -64,6 +64,11 @@ impl SpineProject {
 
     /// index 번째 스켈레톤의 모델을 만든다.
     pub fn read_model(&self, index: usize) -> SpineResult<SkeletonModel> {
+        self.read_model_with(index, false)
+    }
+
+    /// [`read_model`](Self::read_model) 과 같고, export_all 이면 Export 체크가 꺼진 첨부도 넣는다(Spine «Export all»).
+    pub fn read_model_with(&self, index: usize, export_all: bool) -> SpineResult<SkeletonModel> {
         let Some(&(_, sk)) = self.skeletons.get(index) else {
             return Err(SpineError::Usage(format!(
                 "스켈레톤 번호 {index}가 범위를 벗어났습니다(스켈레톤 {}개)",
@@ -71,7 +76,7 @@ impl SpineProject {
             )));
         };
         let view = View { doc: &self.doc, body: &self.body, format: &self.version };
-        match catch_unwind(AssertUnwindSafe(|| reader::Reader::new(&view).read(sk))) {
+        match catch_unwind(AssertUnwindSafe(|| reader::Reader::new(&view).export_all(export_all).read(sk))) {
             Ok(result) => result,
             Err(_) => Err(view::broken("내부 오류")),
         }

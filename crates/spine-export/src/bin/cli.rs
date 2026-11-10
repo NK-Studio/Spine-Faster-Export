@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use spine_export::{export_skeleton, ExportOptions, SkeletonFormat, SpineProject};
+use spine_export::{export_single_atlas, export_skeleton, import_spine_settings, wants_single_atlas, ExportOptions, JsonFormat, PackSource, PackTarget, SkeletonFormat, SpineProject};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -23,6 +23,22 @@ fn main() -> ExitCode {
             }
         }
     }
+    // Spine 내보내기 설정 JSON(Export 대화상자의 Save)도 바탕으로 깐다.
+    if let Some(i) = args.iter().position(|a| a == "--export-settings") {
+        let path = args.get(i + 1).cloned().unwrap_or_default();
+        match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| import_spine_settings(&t, &opts).map_err(|e| e.to_string())) {
+            Ok(got) => {
+                for n in &got.notes {
+                    println!("참고: {n}");
+                }
+                opts = got.options;
+            }
+            Err(e) => {
+                eprintln!("내보내기 설정을 읽을 수 없습니다({path}): {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -31,9 +47,23 @@ fn main() -> ExitCode {
             args.get(i).cloned().unwrap_or_default()
         };
         match a {
-            "--preset" => {
+            "--preset" | "--export-settings" => {
                 value();
             }
+            "--json-format" => {
+                opts.json_format = match value().to_ascii_lowercase().as_str() {
+                    "javascript" => JsonFormat::JavaScript,
+                    "minimal" => JsonFormat::Minimal,
+                    _ => JsonFormat::Json,
+                }
+            }
+            "--json-ext" => opts.json_ext = value(),
+            "--pretty" => opts.pretty_print = true,
+            "--no-pretty" => opts.pretty_print = false,
+            "--export-all" => opts.export_all = true,
+            "--no-warnings" => opts.warnings = false,
+            "--pack-source" => opts.pack_source = if value() == "imagefolders" { PackSource::ImageFolders } else { PackSource::Attachments },
+            "--pack-target" => opts.pack_target = if value() == "single" { PackTarget::Single } else { PackTarget::PerSkeleton },
             "--format" => {
                 opts.format = match value().as_str() {
                     "json" => SkeletonFormat::Json,
@@ -53,7 +83,7 @@ fn main() -> ExitCode {
                 // Spine 이 저장한 pack.json(Texture Packer Settings)
                 let path = value();
                 match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string())) {
-                    Ok(p) => opts.pack = p,
+                    Ok(p) => opts.pack = spine_export::AtlasSettings::normalize(p),
                     Err(e) => {
                         eprintln!("팩 설정을 읽을 수 없습니다({path}): {e}");
                         return ExitCode::from(2);
@@ -74,7 +104,7 @@ fn main() -> ExitCode {
         i += 1;
     }
     if positional.len() != 2 {
-        eprintln!("사용법: spine-export-cli 입력.spine 출력폴더 [--version 4.2.43] [--format json|binary|both] [--atlas] [--pack-settings pack.json] [--preset anc] ...");
+        eprintln!("사용법: spine-export-cli 입력.spine 출력폴더 [--version 4.2.43] [--format json|binary|both] [--atlas] [--pack-settings pack.json] [--export-settings spine-export.json] [--json-format json|javascript|minimal] [--pretty] [--export-all] [--pack-source attachments|imagefolders] [--pack-target perskeleton|single] [--preset anc] ...");
         return ExitCode::from(2);
     }
     let input = PathBuf::from(&positional[0]);
@@ -106,6 +136,22 @@ fn main() -> ExitCode {
         None => (0..names.len()).collect(),
     };
     let mut failed = 0;
+    if wants_single_atlas(&opts) {
+        match export_single_atlas(&project, &indices, &input, &out, &opts) {
+            Ok(report) => {
+                for n in &report.notes {
+                    println!("참고: {n}");
+                }
+                for f in &report.files {
+                    println!("저장: {}", f.display());
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("아틀라스를 만들 수 없습니다: {e}");
+            }
+        }
+    }
     for i in indices {
         match export_skeleton(&project, i, &input, &out, &opts) {
             Ok(report) => {

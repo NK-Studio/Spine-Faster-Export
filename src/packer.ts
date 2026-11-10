@@ -28,6 +28,7 @@ export interface PackSettings {
   maxWidth: number;
   maxHeight: number;
   pot: boolean;
+  multipleOfFour: boolean;
   square: boolean;
   filterMin: Filter;
   filterMag: Filter;
@@ -36,6 +37,8 @@ export interface PackSettings {
   format: PixelFormat;
   outputFormat: string;
   grid: boolean;
+  /** Spine 4.x 의 Packing 이름(rectangles · grid · polygons). 화면은 `grid` 를 쓰고 저장할 때 맞춘다. */
+  packing: string;
   premultiplyAlpha: boolean;
   bleed: boolean;
   bleedIterations: number;
@@ -47,6 +50,8 @@ export interface PackSettings {
   useIndexes: boolean;
   fast: boolean;
   debug: boolean;
+  /** 두 번째 페이지부터 이름과 번호 사이에 넣는 글자(이름_2.png). */
+  separator: string;
 }
 
 const FILTERS: Filter[] = ["Nearest", "Linear", "MipMap", "MipMapNearestNearest", "MipMapLinearNearest", "MipMapNearestLinear", "MipMapLinearLinear"];
@@ -63,6 +68,7 @@ export function packSummary(p: PackSettings, unity = false): string {
   if (p.rotation) parts.push("회전");
   if (p.alias) parts.push("Alias");
   if (p.pot) parts.push("POT");
+  if (p.multipleOfFour) parts.push("4의 배수");
   if (p.square) parts.push("정사각형");
   if (p.grid) parts.push("Grid");
   const scales = p.scale.filter((s) => s > 0);
@@ -162,6 +168,7 @@ export function openPackerDialog(
           <div class="pk-kv">${slot("minWidth")}${slot("minHeight")}${slot("maxWidth")}${slot("maxHeight")}</div>
           <div class="pk-checks center">
             ${chk("pot", "Power of two", "페이지 크기를 2의 거듭제곱으로 맞춥니다")}
+            ${chk("multipleOfFour", "Divisible by 4", "페이지 크기를 4의 배수로 맞춥니다(일부 압축 텍스처 형식에 필요)")}
             ${chk("square", "Square", "페이지를 정사각형으로 맞춥니다")}
           </div>
         </section>
@@ -208,7 +215,7 @@ export function openPackerDialog(
           </div>
           <div class="pk-checks">
             ${chk("unity", "Unity (spine-unity)", `spine-unity 가져오기 형식: atlas 는 ${UNITY_ATLAS_EXT}, 바이너리는 ${UNITY_SKEL_EXT}`, true, unity)}
-            ${chk("combineSubdirectories", "Combine subdirectories", "폴더째 묶을 때만 쓰는 옵션입니다. 이 앱은 스켈레톤 첨부로 묶으므로 쓰지 않습니다", false)}
+            ${chk("combineSubdirectories", "Combine subdirectories", "«이미지 폴더»로 묶을 때: 켜면 하위 폴더의 이미지를 같은 페이지에 섞어 묶고, 끄면 폴더마다 페이지를 따로 씁니다. «첨부 이미지»로 묶을 때는 쓰지 않습니다")}
             ${chk("flattenPaths", "Flatten paths", "영역 이름에서 폴더를 뺍니다")}
             ${chk("useIndexes", "Use indexes", "이름 끝의 _숫자를 index 로 씁니다")}
             ${chk("fast", "Fast", "덜 촘촘하지만 빨리 묶습니다")}

@@ -19,7 +19,9 @@ use spine_model::{
     ModelSkinEntry, ModelSlot, ModelTimeline, ModelToProperty, SkeletonModel, SpineError, SpineResult,
 };
 
-use json::{dumps, write_map_entries, JsonMap, J};
+use json::{dumps_styled, write_map_entries, JsonMap, J};
+
+pub use json::JsonFormat;
 use natural::{natural_cmp, ordinal_cmp};
 use numbers::{f32r, fmt_f32, fmt_round, round_half_up};
 
@@ -30,9 +32,14 @@ pub mod number {
 
 /// version: "4.0.xx" ~ "4.3.xx". nonessential: 비필수 데이터 포함.
 pub fn write_json(model: &SkeletonModel, version: &str, nonessential: bool) -> SpineResult<String> {
+    write_json_styled(model, version, nonessential, JsonFormat::Json, false)
+}
+
+/// [`write_json`] 에 Spine 내보내기 대화상자의 Format · Pretty print 를 더한 것.
+pub fn write_json_styled(model: &SkeletonModel, version: &str, nonessential: bool, format: JsonFormat, pretty: bool) -> SpineResult<String> {
     let w = Writer::new(model, version, nonessential)?;
     let output = w.build()?;
-    Ok(dumps(&J::Map(output)))
+    Ok(dumps_styled(&J::Map(output), format, pretty))
 }
 
 const UNSET: f64 = 2147483648.0;

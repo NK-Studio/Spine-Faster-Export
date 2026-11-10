@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 pub use spine_atlas::{AtlasSettings, PixelFormat, TextureFilter, TextureWrap};
+use spine_atlas::Source;
 pub use spine_model::{AtlasOutput, AtlasPage, SkeletonModel, SpineError, SpineResult};
 pub use spine_project::SpineProject;
 
@@ -31,6 +32,66 @@ impl SkeletonFormat {
     }
 }
 
+/// JSON 의 Format(Spine 내보내기 대화상자).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JsonFormat {
+    #[default]
+    Json,
+    JavaScript,
+    Minimal,
+}
+
+impl JsonFormat {
+    fn style(self) -> spine_json::JsonFormat {
+        match self {
+            JsonFormat::Json => spine_json::JsonFormat::Json,
+            JsonFormat::JavaScript => spine_json::JsonFormat::JavaScript,
+            JsonFormat::Minimal => spine_json::JsonFormat::Minimal,
+        }
+    }
+
+    /// Spine 설정 파일에 쓰는 이름.
+    fn spine_name(self) -> &'static str {
+        match self {
+            JsonFormat::Json => "JSON",
+            JsonFormat::JavaScript => "JavaScript",
+            JsonFormat::Minimal => "Minimal",
+        }
+    }
+
+    fn parse(s: &str) -> Option<JsonFormat> {
+        match s.to_ascii_lowercase().as_str() {
+            "json" => Some(JsonFormat::Json),
+            "javascript" => Some(JsonFormat::JavaScript),
+            "minimal" => Some(JsonFormat::Minimal),
+            _ => None,
+        }
+    }
+}
+
+/// 텍스처 아틀라스에 넣을 이미지(Spine `packSource`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PackSource {
+    /// 첨부가 쓰는 이미지만.
+    #[default]
+    Attachments,
+    /// 스켈레톤 이미지 폴더의 이미지 모두.
+    ImageFolders,
+}
+
+/// 아틀라스를 나누는 단위(Spine `packTarget`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PackTarget {
+    /// 스켈레톤마다 하나(스켈레톤 이름).
+    #[default]
+    PerSkeleton,
+    /// 모든 스켈레톤을 하나로(프로젝트 파일 이름).
+    Single,
+}
+
 /// 내보내기 설정. 프런트엔드와 직렬화로 주고받는다(camelCase).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -48,6 +109,17 @@ pub struct ExportOptions {
     pub skel_ext: String,
     /// 비우면 프로젝트에 적힌 이미지 경로(.spine 기준).
     pub images_dir: Option<PathBuf>,
+    /// JSON 파일 확장자.
+    pub json_ext: String,
+    pub json_format: JsonFormat,
+    /// JSON 을 읽기 좋게 줄을 나눠 쓴다.
+    pub pretty_print: bool,
+    /// Export 체크가 꺼진 첨부도 내보낸다(Export all).
+    pub export_all: bool,
+    /// 내보낸 뒤 알림(경고)을 보여 준다.
+    pub warnings: bool,
+    pub pack_source: PackSource,
+    pub pack_target: PackTarget,
 }
 
 impl Default for ExportOptions {
@@ -61,6 +133,13 @@ impl Default for ExportOptions {
             pack: AtlasSettings::default(),
             skel_ext: ".skel".into(),
             images_dir: None,
+            json_ext: ".json".into(),
+            json_format: JsonFormat::Json,
+            pretty_print: false,
+            export_all: false,
+            warnings: true,
+            pack_source: PackSource::Attachments,
+            pack_target: PackTarget::PerSkeleton,
         }
     }
 }
@@ -154,7 +233,7 @@ pub fn export_skeleton(
     opts: &ExportOptions,
 ) -> SpineResult<ExportReport> {
     let version = resolve_version(project, opts)?;
-    let mut model = project.read_model(index)?;
+    let mut model = project.read_model_with(index, opts.export_all)?;
     if opts.clean {
         spine_binary::clean_model(&mut model);
     }
@@ -164,8 +243,8 @@ pub fn export_skeleton(
     fs::create_dir_all(out_dir)?;
 
     if opts.format.json() {
-        let text = spine_json::write_json(&model, &version, opts.nonessential.unwrap_or(true))?;
-        let path = out_dir.join(format!("{file_name}.json"));
+        let text = spine_json::write_json_styled(&model, &version, opts.nonessential.unwrap_or(true), opts.json_format.style(), opts.pretty_print)?;
+        let path = out_dir.join(format!("{file_name}{}", opts.json_ext));
         fs::write(&path, text)?;
         report.files.push(path);
     }
@@ -189,37 +268,99 @@ pub fn export_skeleton(
         }
     }
 
-    if opts.atlas {
-        let pack = &opts.pack;
-        if pack.bleed && pack.pma {
-            report.notes.push("PMA 가 켜져 있어 블리드는 적용하지 않았습니다.".into());
-        }
+    if opts.atlas && opts.pack_target == PackTarget::PerSkeleton {
         let images = images_dir(&model, spine_path, opts.images_dir.as_deref());
-        for (suffix, packed) in spine_atlas::pack_scales(&model, &images, &file_name, pack)? {
-            let tag = if suffix.is_empty() { String::new() } else { format!("[{suffix}] ") };
-            if !packed.missing.is_empty() {
-                report.notes.push(format!("{tag}{}", missing_note(&packed.missing, &images)));
-            }
-            if !packed.ignored.is_empty() {
-                report.notes.push(format!("{tag}투명한 이미지 {}개를 넣지 않았습니다(Ignore blank images): {}", packed.ignored.len(), short_list(&packed.ignored)));
-            }
-            let atlas = packed.output;
-            let atlas_path = out_dir.join(format!("{file_name}{suffix}{}", pack.atlas_extension));
-            fs::write(&atlas_path, &atlas.atlas_text)?;
-            report.files.push(atlas_path);
-            for page in &atlas.pages {
-                let path = out_dir.join(&page.name);
-                fs::write(&path, spine_atlas::encode_png(page))?;
-                report.files.push(path);
-            }
-        }
+        let sources = sources_for(&model, &images, opts)?;
+        write_atlas(&sources, &images, &file_name, out_dir, &opts.pack, &mut report)?;
     }
 
+    if !opts.warnings {
+        report.notes.clear();
+    }
+    Ok(report)
+}
+
+/// 팩 소스에 따라 스켈레톤 하나의 이미지 목록을 만든다.
+fn sources_for(model: &SkeletonModel, images: &Path, opts: &ExportOptions) -> SpineResult<Vec<Source>> {
+    match opts.pack_source {
+        PackSource::Attachments => spine_atlas::attachment_sources(model, images),
+        PackSource::ImageFolders => spine_atlas::folder_sources(model, images, opts.pack.combine_subdirectories),
+    }
+}
+
+/// 이미지 목록을 묶어 `base + 접미사 + 확장자` 와 페이지 PNG 를 쓴다.
+fn write_atlas(sources: &[Source], images: &Path, base: &str, out_dir: &Path, pack: &AtlasSettings, report: &mut ExportReport) -> SpineResult<()> {
+    if pack.bleed && pack.pma {
+        report.notes.push("PMA 가 켜져 있어 블리드는 적용하지 않았습니다.".into());
+    }
+    if pack.packing.eq_ignore_ascii_case("polygons") {
+        report.notes.push("Packing: Polygons 는 지원하지 않아 직사각형으로 묶었습니다.".into());
+    }
+    for (suffix, packed) in spine_atlas::pack_sources_scales(sources, base, pack)? {
+        let tag = if suffix.is_empty() { String::new() } else { format!("[{suffix}] ") };
+        if !packed.missing.is_empty() {
+            report.notes.push(format!("{tag}{}", missing_note(&packed.missing, images)));
+        }
+        if !packed.ignored.is_empty() {
+            report.notes.push(format!("{tag}투명한 이미지 {}개를 넣지 않았습니다(Ignore blank images): {}", packed.ignored.len(), short_list(&packed.ignored)));
+        }
+        let atlas = packed.output;
+        let atlas_path = out_dir.join(format!("{base}{suffix}{}", pack.atlas_extension));
+        fs::write(&atlas_path, &atlas.atlas_text)?;
+        report.files.push(atlas_path);
+        for page in &atlas.pages {
+            let path = out_dir.join(&page.name);
+            fs::write(&path, spine_atlas::encode_png(page))?;
+            report.files.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// «Single atlas» 의 이름: 프로젝트 파일 이름에서 확장자를 뺀 것.
+pub fn single_atlas_name(spine_path: &Path) -> String {
+    sanitize_file_name(&spine_path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "atlas".into()))
+}
+
+/// 설정이 «Single atlas» 로 묶기인가(스켈레톤별 내보내기 뒤에 [`export_single_atlas`] 를 한 번 부른다).
+pub fn wants_single_atlas(opts: &ExportOptions) -> bool {
+    opts.atlas && opts.pack_target == PackTarget::Single
+}
+
+/// 고른 스켈레톤의 이미지를 atlas 하나로 묶어 out_dir 에 쓴다(Pack target «Single atlas»).
+pub fn export_single_atlas(project: &SpineProject, indices: &[usize], spine_path: &Path, out_dir: &Path, opts: &ExportOptions) -> SpineResult<ExportReport> {
+    let name = single_atlas_name(spine_path);
+    let mut report = ExportReport { skeleton: format!("{name}{}", opts.pack.atlas_extension), ..Default::default() };
+    fs::create_dir_all(out_dir)?;
+    let mut lists = Vec::with_capacity(indices.len());
+    let mut first_images: Option<PathBuf> = None;
+    for &index in indices {
+        let model = project.read_model_with(index, opts.export_all)?;
+        let images = images_dir(&model, spine_path, opts.images_dir.as_deref());
+        match sources_for(&model, &images, opts) {
+            Ok(list) => lists.push(list),
+            // 이미지가 없는 스켈레톤은 건너뛴다(다른 스켈레톤의 이미지는 묶는다)
+            Err(SpineError::Format(m)) => report.notes.push(format!("{}: {m}", model.name.clone().unwrap_or_else(|| format!("skeleton{index}")))),
+            Err(e) => return Err(e),
+        }
+        first_images.get_or_insert(images);
+    }
+    let (sources, clash) = spine_atlas::merge_sources(lists);
+    if sources.is_empty() {
+        return Err(SpineError::Format("묶을 이미지가 없습니다".into()));
+    }
+    if !clash.is_empty() {
+        report.notes.push(format!("이름이 같은 다른 이미지 {}개는 먼저 나온 것을 썼습니다: {}", clash.len(), short_list(&clash)));
+    }
+    write_atlas(&sources, &first_images.unwrap_or_default(), &name, out_dir, &opts.pack, &mut report)?;
+    if !opts.warnings {
+        report.notes.clear();
+    }
     Ok(report)
 }
 
 /// 스켈레톤 하나를 내보내면 out_dir 에 생길 파일 중 이미 있는 것(덮어쓰기 확인용).
-/// 페이지 PNG 는 개수를 미리 알 수 없으므로 `이름.png` 와 `이름<숫자>.png` 를 모두 본다.
+/// 페이지 PNG 는 개수를 미리 알 수 없으므로 `이름.png` 와 `이름_<숫자>.png` 를 모두 본다.
 pub fn existing_outputs(skeleton_name: &str, out_dir: &Path, opts: &ExportOptions) -> Vec<PathBuf> {
     let file_name = sanitize_file_name(skeleton_name);
     let mut found: Vec<PathBuf> = Vec::new();
@@ -230,28 +371,180 @@ pub fn existing_outputs(skeleton_name: &str, out_dir: &Path, opts: &ExportOption
         }
     };
     if opts.format.json() {
-        check(&mut found, format!("{file_name}.json"));
+        check(&mut found, format!("{file_name}{}", opts.json_ext));
     }
     if opts.format.binary() {
         check(&mut found, format!("{file_name}{}", opts.skel_ext));
     }
-    if opts.atlas {
-        let entries: Vec<String> = fs::read_dir(out_dir)
-            .map(|rd| rd.filter_map(|e| e.ok()).filter_map(|e| e.file_name().into_string().ok()).collect())
-            .unwrap_or_default();
-        for (_, suffix) in opts.pack.scales() {
-            let base = format!("{file_name}{suffix}");
-            check(&mut found, format!("{base}{}", opts.pack.atlas_extension));
-            for e in &entries {
-                if let Some(rest) = e.strip_prefix(&base).and_then(|r| r.strip_suffix(".png")) {
-                    if rest.bytes().all(|b| b.is_ascii_digit()) {
-                        check(&mut found, e.clone());
-                    }
+    if opts.atlas && opts.pack_target == PackTarget::PerSkeleton {
+        found.extend(existing_atlas_outputs(&file_name, out_dir, opts));
+    }
+    found
+}
+
+/// `base` 라는 이름으로 atlas 를 쓰면 덮어쓸 파일(atlas 와 페이지 PNG).
+pub fn existing_atlas_outputs(base_name: &str, out_dir: &Path, opts: &ExportOptions) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = Vec::new();
+    let mut check = |name: String| {
+        let p = out_dir.join(name);
+        if p.is_file() && !found.contains(&p) {
+            found.push(p);
+        }
+    };
+    let entries: Vec<String> = fs::read_dir(out_dir)
+        .map(|rd| rd.filter_map(|e| e.ok()).filter_map(|e| e.file_name().into_string().ok()).collect())
+        .unwrap_or_default();
+    for (_, suffix) in opts.pack.scales() {
+        let base = format!("{base_name}{suffix}");
+        check(format!("{base}{}", opts.pack.atlas_extension));
+        for e in &entries {
+            if let Some(rest) = e.strip_prefix(&base).and_then(|r| r.strip_suffix(".png")) {
+                // 이름.png, 이름_2.png …(separator 가 비었으면 이름2.png)
+                let digits = rest.strip_prefix(opts.pack.separator.as_str()).filter(|d| !d.is_empty());
+                if rest.is_empty() || digits.is_some_and(|d| d.bytes().all(|b| b.is_ascii_digit())) {
+                    check(e.clone());
                 }
             }
         }
     }
     found
+}
+
+// ---------------------------------------------------------------- Spine 내보내기 설정 파일
+
+/// Spine 의 내보내기 설정 JSON(Export 대화상자의 Save)에서 읽은 것.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedSettings {
+    pub options: ExportOptions,
+    /// 설정에 적힌 출력 폴더(없거나 비었으면 None).
+    pub output: Option<String>,
+    /// JSON 내보내기의 Version(예: "4.1"). 없으면 None.
+    pub version: Option<String>,
+    /// 옮기지 못한 항목 등 알릴 것.
+    pub notes: Vec<String>,
+}
+
+/// Spine 내보내기 설정 JSON(`"class": "export-json" | "export-binary"`)을 읽어 base 위에 덮는다.
+/// 설정에 없는 항목(이미지 폴더 등)은 base 의 값을 그대로 둔다.
+pub fn import_spine_settings(text: &str, base: &ExportOptions) -> SpineResult<ImportedSettings> {
+    use serde_json::Value;
+    let bad = |m: String| SpineError::Format(format!("Spine 내보내기 설정을 읽을 수 없습니다: {m}"));
+    let v: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| bad(e.to_string()))?;
+    let obj = v.as_object().ok_or_else(|| bad("JSON 객체가 아닙니다".into()))?;
+    let class = obj.get("class").and_then(Value::as_str).unwrap_or("");
+    let mut o = base.clone();
+    let mut notes = Vec::new();
+    let string = |k: &str| obj.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
+    let flag = |k: &str| obj.get(k).and_then(Value::as_bool);
+    match class.rsplit(['.', '$']).next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "export-json" | "exportjson" => {
+            o.format = SkeletonFormat::Json;
+            if let Some(e) = string("extension") {
+                o.json_ext = e;
+            }
+            if let Some(f) = string("format") {
+                match JsonFormat::parse(&f) {
+                    Some(f) => o.json_format = f,
+                    None => notes.push(format!("모르는 JSON 형식 «{f}» 은 건너뛰었습니다.")),
+                }
+            }
+            if let Some(b) = flag("prettyPrint") {
+                o.pretty_print = b;
+            }
+            if let Some(b) = ["all", "exportAll", "forceAll"].iter().find_map(|k| flag(k)) {
+                o.export_all = b;
+            }
+        }
+        "export-binary" | "exportbinary" => {
+            o.format = SkeletonFormat::Binary;
+            if let Some(e) = string("extension") {
+                o.skel_ext = e;
+            }
+        }
+        "" => return Err(bad("\"class\" 가 없습니다(Spine 의 내보내기 대화상자에서 저장한 파일인지 확인하세요)".into())),
+        other => return Err(bad(format!("데이터 내보내기 설정이 아닙니다(class: {other}). JSON · 바이너리 내보내기 설정만 읽습니다"))),
+    }
+    if let Some(b) = flag("nonessential") {
+        o.nonessential = Some(b);
+    }
+    if let Some(b) = flag("cleanUp") {
+        o.clean = b;
+    }
+    if let Some(b) = flag("warnings") {
+        o.warnings = b;
+    }
+    match obj.get("packAtlas") {
+        Some(Value::Object(_)) => {
+            let pack: AtlasSettings = serde_json::from_value(obj["packAtlas"].clone()).map_err(|e| bad(format!("packAtlas: {e}")))?;
+            o.pack = pack.normalize();
+            o.atlas = true;
+            let p = &obj["packAtlas"];
+            if !o.pack.output_format.eq_ignore_ascii_case("png") {
+                notes.push(format!("출력 형식 {} 은 지원하지 않아 PNG 로 바꿨습니다.", o.pack.output_format));
+                o.pack.output_format = "png".into();
+            }
+            if o.pack.packing == "polygons" {
+                notes.push("Packing: Polygons 는 지원하지 않아 직사각형으로 묶습니다.".into());
+            }
+            if p.get("legacyOutput").and_then(Value::as_bool) == Some(true) {
+                notes.push("Legacy output 은 지원하지 않습니다(새 atlas 형식으로 씁니다).".into());
+            }
+            if p.get("autoScale").and_then(Value::as_bool) == Some(true) {
+                notes.push("Auto scale 은 지원하지 않습니다.".into());
+            }
+        }
+        Some(Value::Null) | None => o.atlas = false,
+        Some(_) => return Err(bad("packAtlas 가 객체가 아닙니다".into())),
+    }
+    match string("packSource").map(|s| s.to_ascii_lowercase()).as_deref() {
+        Some("attachments") => o.pack_source = PackSource::Attachments,
+        Some("imagefolders") => o.pack_source = PackSource::ImageFolders,
+        Some(other) => notes.push(format!("모르는 packSource «{other}» 는 건너뛰었습니다.")),
+        None => {}
+    }
+    match string("packTarget").map(|s| s.to_ascii_lowercase()).as_deref() {
+        Some("perskeleton") => o.pack_target = PackTarget::PerSkeleton,
+        Some("single") => o.pack_target = PackTarget::Single,
+        Some(other) => notes.push(format!("packTarget «{other}» 는 지원하지 않아 건너뛰었습니다.")),
+        None => {}
+    }
+    Ok(ImportedSettings { options: o, output: string("output"), version: string("version"), notes })
+}
+
+/// 지금 설정을 Spine 내보내기 설정 JSON 으로. 형식이 JSON 이면 `export-json`, 아니면 `export-binary`.
+/// Spine 이 저장하는 것과 같은 키만 쓴다(이 앱에만 있는 설정은 빠진다).
+pub fn export_spine_settings(opts: &ExportOptions, input: Option<&str>, output: Option<&str>) -> SpineResult<String> {
+    use serde_json::{json, Map, Value};
+    let json_class = opts.format == SkeletonFormat::Json;
+    let mut m = Map::new();
+    m.insert("class".into(), json!(if json_class { "export-json" } else { "export-binary" }));
+    if json_class {
+        m.insert("extension".into(), json!(opts.json_ext));
+        m.insert("format".into(), json!(opts.json_format.spine_name()));
+        m.insert("prettyPrint".into(), json!(opts.pretty_print));
+    } else {
+        m.insert("extension".into(), json!(opts.skel_ext));
+    }
+    m.insert("nonessential".into(), json!(opts.nonessential.unwrap_or(json_class)));
+    m.insert("cleanUp".into(), json!(opts.clean));
+    let pack = if opts.atlas {
+        let mut p = serde_json::to_value(opts.pack.clone().for_save()).map_err(|e| SpineError::Format(e.to_string()))?;
+        if let Some(p) = p.as_object_mut() {
+            p.remove("grid"); // Spine 4.x 는 "packing" 으로 적는다
+        }
+        p
+    } else {
+        Value::Null
+    };
+    m.insert("packAtlas".into(), pack);
+    m.insert("packSource".into(), json!(if opts.pack_source == PackSource::ImageFolders { "imagefolders" } else { "attachments" }));
+    m.insert("packTarget".into(), json!(if opts.pack_target == PackTarget::Single { "single" } else { "perskeleton" }));
+    m.insert("warnings".into(), json!(opts.warnings));
+    m.insert("output".into(), json!(output.unwrap_or("")));
+    m.insert("input".into(), json!(input.unwrap_or("")));
+    m.insert("open".into(), json!(false));
+    serde_json::to_string_pretty(&Value::Object(m)).map_err(|e| SpineError::Format(e.to_string()))
 }
 
 fn short_list(names: &[String]) -> String {
@@ -298,17 +591,44 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sfe-existing-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        for f in ["hero.skel.bytes", "hero.atlas.txt", "hero.png", "hero2.png", "hero_other.png", "heroes.json", "x.json"] {
+        for f in ["hero.skel.bytes", "hero.atlas.txt", "hero.png", "hero_2.png", "hero2.png", "hero_other.png", "heroes.json", "x.json"] {
             fs::write(dir.join(f), b"x").unwrap();
         }
         let opts = ExportOptions::preset_anc();
         let mut got: Vec<String> = existing_outputs("hero", &dir, &opts).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
         got.sort();
-        assert_eq!(got, vec!["hero.atlas.txt", "hero.png", "hero.skel.bytes", "hero2.png"]);
+        assert_eq!(got, vec!["hero.atlas.txt", "hero.png", "hero.skel.bytes", "hero_2.png"]);
         // 아틀라스를 끄면 바이너리만
         let no_atlas = ExportOptions { atlas: false, ..ExportOptions::preset_anc() };
         assert_eq!(existing_outputs("hero", &dir, &no_atlas).len(), 1);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Spine 이 저장한 내보내기 설정을 읽고, 다시 써서 읽어도 같다.
+    #[test]
+    fn spine_settings_round_trip() {
+        let text = r#"{"class":"export-binary","extension":".skel.bytes","nonessential":true,"cleanUp":true,
+            "packAtlas":{"alias":true,"maxWidth":2048,"maxHeight":2048,"multipleOfFour":true,"premultiplyAlpha":false,"bleed":true,
+              "scaleResampling":["bicubic"],"atlasExtension":".atlas.txt","packing":"grid","webp":null,"id":-1,"separator":"_"},
+            "packSource":"attachments","packTarget":"single","warnings":true,"output":"/out","id":-1,"input":"/in/cat.spine","open":false}"#;
+        let got = import_spine_settings(text, &ExportOptions::default()).unwrap();
+        let o = &got.options;
+        assert_eq!(o.format, SkeletonFormat::Binary);
+        assert_eq!((o.skel_ext.as_str(), o.nonessential, o.clean, o.atlas), (".skel.bytes", Some(true), true, true));
+        assert!(o.pack.alias && o.pack.bleed && !o.pack.pma && o.pack.multiple_of_four && o.pack.grid);
+        assert_eq!((o.pack_source, o.pack_target), (PackSource::Attachments, PackTarget::Single));
+        assert_eq!(got.output.as_deref(), Some("/out"));
+        let saved = export_spine_settings(o, Some("/in/cat.spine"), Some("/out")).unwrap();
+        assert!(saved.contains("\"packing\": \"grid\"") && !saved.contains("\"grid\":"));
+        let again = import_spine_settings(&saved, &ExportOptions::default()).unwrap();
+        assert_eq!(serde_json::to_string(&again.options).unwrap(), serde_json::to_string(o).unwrap());
+
+        let json = r#"{"class":"export-json","extension":".txt","format":"Minimal","prettyPrint":true,"nonessential":false,"cleanUp":false,"packAtlas":null,"version":"4.1"}"#;
+        let got = import_spine_settings(json, &ExportOptions::preset_anc()).unwrap();
+        let o = &got.options;
+        assert_eq!((o.format, o.json_format, o.pretty_print, o.atlas), (SkeletonFormat::Json, JsonFormat::Minimal, true, false));
+        assert_eq!((o.json_ext.as_str(), got.version.as_deref()), (".txt", Some("4.1")));
+        assert!(import_spine_settings(r#"{"class":"export-png"}"#, &ExportOptions::default()).is_err());
     }
 
     /// 프런트엔드가 보내는 모양(camelCase, pack 안에 pack.json 키) 그대로 읽힌다.

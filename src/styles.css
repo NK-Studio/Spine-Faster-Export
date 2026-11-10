@@ -385,8 +385,6 @@ select.field option { background: var(--git-menu-bg); color: var(--git-text); }
 }
 .tab-pane { flex: 1; min-height: 0; overflow: auto; padding: 18px 20px; }
 .tab-pane[hidden] { display: none; }
-.tab-pane:not([hidden]) { animation: pane-in 140ms ease-out; }
-@keyframes pane-in { from { opacity: 0; transform: translateY(2px); } }
 /* 한 열 양식: 오른쪽 맞춤 라벨 + 컨트롤(Islands 설정 화면처럼) */
 .form { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 14px 12px; align-items: start; max-width: 600px; }
 .form > .lbl { text-align: right; line-height: 28px; }
@@ -659,3 +657,6 @@ input[type="text"], input:not([type]), textarea, .field-with-icon { cursor: text
 .lbl.scrub { cursor: ew-resize; }
 .modal-backdrop { cursor: default; }
 input:disabled, textarea:disabled, .no-project .field-with-icon { cursor: default; }
+
+/* Spine 내보내기 대화상자처럼: [팩] [소스] ~ [타깃] */
+.row > .tilde { color: var(--git-text-muted, currentColor); opacity: 0.7; padding: 0 2px; }

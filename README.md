@@ -17,9 +17,11 @@ Spine 프로그램 없이 `.spine` 프로젝트에서 고른 스켈레톤만 런
 
 슬라이더는 막대를 누르거나 끌고, 라벨을 좌우로 끌거나, 숫자칸에 직접 적어 바꿉니다. 막대에 포커스가 있으면 방향키(Shift 는 10씩)와 휠도 됩니다. 크기 막대(Min/Max width·height)는 2의 거듭제곱 눈금에 붙고, 그 사이 값은 숫자칸에 적습니다.
 
-팩 설정 대화상자의 **Load / Save** 는 Spine 이 쓰는 `pack.json` 을 그대로 읽고 씁니다. 출력 형식은 PNG 만 되고, *Combine subdirectories* 는 폴더째 묶을 때의 옵션이라 쓰지 않습니다. *Format* 은 atlas 의 `format:` 줄만 바꾸고 PNG 는 RGBA 로 저장합니다.
+스켈레톤 데이터 탭에는 Spine 내보내기 대화상자의 **JSON 형식**(JSON · JavaScript · Minimal), **Pretty print**, **JSON 확장자**, **모두 내보내기**(Export all: Export 체크가 꺼진 첨부도 포함), **경고**가 있습니다. 텍스처 아틀라스 탭은 Spine 과 같은 배치입니다: **팩** 체크 · 묶을 이미지(**어태치먼트** · **이미지 폴더**) ~ 단위(**스켈레톤별 아틀라스** · **싱글 아틀라스** = 프로젝트 파일 이름), 그 아래 **팩 설정…**.
 
-**팀 설정** 버튼은 파이썬 PoC 의 `--preset anc` 와 같습니다(Binary · 비필수 데이터 · 애니메이션 정리 · PMA 끔 · 블리드 · 에일리어스 · 2048 · `.skel.bytes` · `.atlas.txt`).
+아래 **설정 불러오기… / 설정 저장…** 은 Spine 내보내기 대화상자의 Save 로 만든 설정 JSON(`"class": "export-json"` · `"export-binary"`)을 읽고 씁니다. 출력 폴더는 불러온 뒤 알림의 «출력 폴더도 적용»을 눌러야 바뀝니다.
+
+팩 설정 대화상자의 **Load / Save** 는 Spine 이 쓰는 `pack.json` 을 그대로 읽고 씁니다. 출력 형식은 PNG 만 되고, *Packing: Polygons* · *Legacy output* · *Auto scale* 은 지원하지 않습니다. *Combine subdirectories* 는 «이미지 폴더»로 묶을 때만 씁니다(폴더 안 `pack.json` 은 읽지 않습니다). *Format* 은 atlas 의 `format:` 줄만 바꾸고 PNG 는 RGBA 로 저장합니다.
 
 ## 구조
 
@@ -52,6 +54,12 @@ pnpm tauri dev
 
 ```bash
 cargo run --release -p spine-export --bin spine-export-cli -- 입력.spine 출력폴더 --version 4.2.43 --format both --atlas --pack-settings pack.json
+```
+
+Spine 내보내기 설정 JSON 으로:
+
+```bash
+cargo run --release -p spine-export --bin spine-export-cli -- 입력.spine 출력폴더 --export-settings binary.export.json
 ```
 
 ## 배포 빌드

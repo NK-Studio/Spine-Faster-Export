@@ -152,8 +152,8 @@ fn alias_bleed_no_pma_and_pages() {
     let out = pack(&m, &dir, "p", &s).unwrap();
     assert!(out.pages.len() > 1);
     assert!(!out.atlas_text.contains("pma:true"));
-    assert!(out.atlas_text.contains("\n\np2.png\n"));
-    assert_eq!(out.pages[0].name, "p1.png");
+    assert!(out.atlas_text.contains("\n\np_2.png\n"));
+    assert_eq!(out.pages[0].name, "p.png");
     let lines: Vec<&str> = out.atlas_text.lines().collect();
     let ia = lines.iter().position(|l| *l == "a").unwrap();
     let ia2 = lines.iter().position(|l| *l == "a2").unwrap();

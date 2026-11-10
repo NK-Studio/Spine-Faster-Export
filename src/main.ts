@@ -6,7 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
 import { icons } from "./icons";
@@ -35,7 +35,16 @@ interface ExportOptions {
   /** Texture Packer Settings(Spine pack.json 키) */
   pack: PackSettings;
   skelExt: string;
-  imagesDir: string | null;
+  /** JSON 파일 확장자. */
+  jsonExt: string;
+  jsonFormat: "json" | "javascript" | "minimal";
+  prettyPrint: boolean;
+  /** Export 체크가 꺼진 첨부도 내보낸다(Spine «Export all»). */
+  exportAll: boolean;
+  /** 내보낸 뒤 알림(경고)을 보여 준다. */
+  warnings: boolean;
+  packSource: "attachments" | "imagefolders";
+  packTarget: "perskeleton" | "single";
   /** Unity(spine-unity) 형식: atlas .atlas.txt · 바이너리 .skel.bytes. 앱 설정에만 둔다(Rust 는 모르는 키를 무시). */
   unity: boolean;
   /** Unity 를 끄면 돌아갈 바이너리 확장자. */
@@ -43,7 +52,8 @@ interface ExportOptions {
 }
 
 interface ExportProgress {
-  index: number;
+  /** 여러 스켈레톤을 묶은 아틀라스(Single atlas)는 null. */
+  index: number | null;
   skeleton: string;
   ok: boolean;
   message: string | null;
@@ -86,6 +96,7 @@ const DEFAULT_PACK: PackSettings = {
   maxWidth: 4096,
   maxHeight: 4096,
   pot: false,
+  multipleOfFour: false,
   square: false,
   filterMin: "Linear",
   filterMag: "Linear",
@@ -94,6 +105,7 @@ const DEFAULT_PACK: PackSettings = {
   format: "RGBA8888",
   outputFormat: "png",
   grid: false,
+  packing: "rectangles",
   premultiplyAlpha: true,
   bleed: false,
   bleedIterations: 2,
@@ -105,30 +117,26 @@ const DEFAULT_PACK: PackSettings = {
   useIndexes: false,
   fast: false,
   debug: false,
+  separator: "_",
 };
 
 const DEFAULTS: ExportOptions = {
   version: "",
-  format: "both",
+  format: "json",
   nonessential: null,
   clean: false,
   atlas: true,
   pack: DEFAULT_PACK,
   skelExt: ".skel",
-  imagesDir: null,
+  jsonExt: ".json",
+  jsonFormat: "json",
+  prettyPrint: false,
+  exportAll: false,
+  warnings: true,
+  packSource: "attachments",
+  packTarget: "perskeleton",
   unity: false,
   skelBeforeUnity: ".skel",
-};
-
-// 팀 설정(파이썬 PoC --preset anc, crates/spine-export `ExportOptions::preset_anc()`)
-const PRESET_ANC: Partial<ExportOptions> = {
-  format: "binary",
-  atlas: true,
-  nonessential: true,
-  clean: true,
-  pack: { ...DEFAULT_PACK, premultiplyAlpha: false, bleed: true, alias: true, maxWidth: 2048, maxHeight: 2048, atlasExtension: ".atlas.txt" },
-  skelExt: ".skel.bytes",
-  unity: true,
 };
 
 function load<T>(key: string, fallback: T): T {
@@ -156,6 +164,8 @@ const prefs = load("sfe.prefs", {
 });
 let options: ExportOptions = load("sfe.options", DEFAULTS);
 options.pack = { ...DEFAULT_PACK, ...(options.pack ?? {}) };
+// 예전 버전이 저장한 이미지 폴더 지정은 더 쓰지 않는다(프로젝트에 적힌 경로만 쓴다).
+delete (options as unknown as { imagesDir?: unknown }).imagesDir;
 if (typeof options.unity !== "boolean") options.unity = options.pack.atlasExtension === UNITY_ATLAS_EXT && options.skelExt === UNITY_SKEL_EXT;
 
 // ───────────────────────────────────────── 상태
@@ -225,8 +235,8 @@ $("#app").innerHTML = `
   </div>
 
   <div class="actions">
-    <button class="btn" id="btn-preset" title="Binary · 비필수 데이터 · 애니메이션 정리 · PMA 끔 · 블리드 · 에일리어스 · 2048 · .skel.bytes · .atlas.txt">팀 설정</button>
-    <button class="btn" id="btn-defaults">기본값</button>
+    <button class="btn" id="btn-settings-load" title="Spine 의 내보내기 대화상자에서 저장(Save)한 설정 JSON 을 불러옵니다">설정 불러오기…</button>
+    <button class="btn" id="btn-settings-save" title="지금 설정을 Spine 내보내기 설정 JSON 으로 저장합니다(Spine 의 Load · CLI --export 로 읽을 수 있습니다)">설정 저장…</button>
     <span class="grow"></span>
     <button class="btn" id="btn-reveal" disabled>${icons.folder}<span>출력 폴더 열기</span></button>
     <button class="btn primary" id="btn-export" disabled></button>
@@ -619,6 +629,11 @@ function exportBlocker(): string | null {
   return v.kind === "unsupported" || v.kind === "invalid" ? v.message : null;
 }
 
+/** «하나로» 묶을 때의 atlas 이름: 프로젝트 파일 이름에서 확장자를 뺀 것(crates/spine-export `single_atlas_name`). */
+function singleAtlasName(): string {
+  return (project?.fileName ?? "atlas").replace(/\.[^.]*$/, "").replace(/[\\/:*?"<>|]/g, "_");
+}
+
 /** 내보낼 파일 이름 미리보기(첫 번째로 고른 스켈레톤 기준). */
 function filePreview(): string {
   const o = options;
@@ -626,11 +641,12 @@ function filePreview(): string {
   const raw = first !== undefined && project ? project.skeletons[first] : "스켈레톤";
   const name = raw.replace(/[\\/:*?"<>|]/g, "_");
   const files: string[] = [];
-  if (o.format !== "binary") files.push(`${name}.json`);
+  if (o.format !== "binary") files.push(`${name}${o.jsonExt}`);
   if (o.format !== "json") files.push(`${name}${o.skelExt}`);
   if (o.atlas) {
     const scales = o.pack.scale.map((v, i) => [v, o.pack.scaleSuffix[i] ?? ""] as const).filter(([v]) => v > 0);
-    for (const [, sfx] of scales.length ? scales : [[1, ""] as const]) files.push(`${name}${sfx}${o.pack.atlasExtension}`, `${name}${sfx}.png`);
+    const base = o.packTarget === "single" && project ? singleAtlasName() : name;
+    for (const [, sfx] of scales.length ? scales : [[1, ""] as const]) files.push(`${base}${sfx}${o.pack.atlasExtension}`, `${base}${sfx}.png`);
   }
   return files.join(" · ");
 }
@@ -643,7 +659,7 @@ function applyProjectState() {
     const el = document.querySelector<HTMLElement>(id);
     if (el) el.inert = none;
   }
-  for (const id of ["#btn-preset", "#btn-defaults"]) $<HTMLButtonElement>(id).disabled = none;
+  for (const id of ["#btn-settings-load", "#btn-settings-save"]) $<HTMLButtonElement>(id).disabled = none;
 }
 
 function renderSettings() {
@@ -695,33 +711,88 @@ function renderSettings() {
         ${seg("fmt", [["json", "JSON"], ["binary", "바이너리"], ["both", "둘 다"]], o.format)}
         <span class="lbl">비필수 데이터:</span>
         ${select("opt-ness", [["auto", "자동 (JSON 포함 · 바이너리 제외)"], ["on", "포함"], ["off", "제외"]], ness, true, "", "auto")}
-        <span class="lbl">바이너리 확장자:</span>
+        ${
+          o.format === "json"
+            ? ""
+            : `<span class="lbl">바이너리 확장자:</span>
         <div class="stack">
           ${select(
             "opt-skel-ext",
             [[".skel", ".skel"], [".skel.bytes", ".skel.bytes"]],
             o.skelExt,
-            o.format !== "json" && !o.unity,
+            !o.unity,
             o.unity ? "Unity(spine-unity) 형식이 켜져 있어 .skel.bytes 로 고정됩니다. 팩 설정의 Options 에서 끌 수 있습니다" : "",
           )}
           ${o.unity ? `<div class="hint">Unity(spine-unity) 형식이라 .skel.bytes 로 고정됩니다.</div>` : ""}
+        </div>`
+        }
+        ${
+          o.format === "binary"
+            ? ""
+            : `<span class="lbl">JSON 형식:</span>
+        <div class="row">
+          ${select(
+            "opt-json-format",
+            [["json", "JSON"], ["javascript", "JavaScript"], ["minimal", "Minimal"]],
+            o.jsonFormat,
+            true,
+            "JSON: 표준 · JavaScript: 이름의 따옴표를 꼭 필요할 때만 · Minimal: 이름·값 대부분에 따옴표 없음(libgdx 같은 너그러운 파서 필요)",
+            "json",
+          )}
+          ${check("opt-pretty", "Pretty print", o.prettyPrint, true, "사람이 읽기 좋게 줄을 나눠 씁니다(파일이 조금 커집니다)")}
         </div>
-        <span></span>
-        ${check("opt-clean", "애니메이션 정리", o.clean, true, "값이 바뀌지 않는 불필요한 키를 지웁니다")}
+        <span class="lbl">JSON 확장자:</span>
+        <input type="text" class="field mono" id="opt-json-ext" spellcheck="false" autocomplete="off" value="${esc(o.jsonExt)}" placeholder=".json" style="max-width:140px" />`
+        }
+        <span class="lbl">출력:</span>
+        <div class="stack">
+          <div class="row">
+            ${check("opt-clean", "애니메이션 정리", o.clean, true, "값이 바뀌지 않는 불필요한 키를 지웁니다(프로젝트 파일은 바꾸지 않습니다)")}
+            ${check("opt-export-all", "모두 내보내기", o.exportAll, true, "Export 체크가 꺼진 첨부도 내보냅니다(Spine 의 Export all)")}
+          </div>
+          <div class="row">
+            ${check("opt-warnings", "경고", o.warnings, true, "내보낸 뒤 알림(건너뛴 파일, 찾지 못한 이미지 등)을 보여 줍니다")}
+          </div>
+        </div>
       </div>`,
     )}
 
     ${pane(
       "atlas",
       `<div class="form">
-        <span class="lbl">묶기:</span>
-        ${seg("atlas", [["off", "안 함"], ["on", "첨부 이미지"]], a ? "on" : "off")}
-        <span class="lbl${a ? "" : " off"}">이미지 폴더:</span>
-        <div class="row">${pathBox(o.imagesDir, "프로젝트에 적힌 경로")}${o.imagesDir ? `<button class="btn icon" id="btn-img-reset" title="프로젝트 경로로">${icons.close}</button>` : ""}<button class="btn icon" id="btn-img" title="이미지 폴더 고르기" ${a ? "" : "disabled"}>${icons.folder}</button></div>
-        <span class="lbl${a ? "" : " off"}">팩 설정:</span>
+        <span class="lbl">텍스처 아틀라스:</span>
         <div class="stack">
-          <div class="pack-sum${a ? "" : " off"}" title="${esc(packSummary(o.pack, o.unity))}">${esc(packSummary(o.pack, o.unity))}</div>
-          <div class="row"><button class="btn" id="btn-pack" ${a ? "" : "disabled"} title="Texture Packer Settings">팩 설정…</button></div>
+          <div class="row">
+            ${check("opt-atlas", "팩", a, true, "내보낼 때 텍스처 아틀라스(atlas + PNG)도 함께 만듭니다")}
+            ${
+              a
+                ? `${select(
+                    "opt-pack-source",
+                    [["attachments", "어태치먼트"], ["imagefolders", "이미지 폴더"]],
+                    o.packSource,
+                    true,
+                    "어태치먼트: 첨부가 쓰는 이미지만 · 이미지 폴더: 스켈레톤 이미지 폴더의 이미지 모두",
+                    "attachments",
+                  )}
+                  <span class="tilde" aria-hidden="true">~</span>
+                  ${select(
+                    "opt-pack-target",
+                    [["perskeleton", "스켈레톤별 아틀라스"], ["single", "싱글 아틀라스"]],
+                    o.packTarget,
+                    true,
+                    "스켈레톤별: 스켈레톤 이름으로 하나씩 · 싱글: 고른 스켈레톤의 이미지를 프로젝트 파일 이름의 atlas 하나에",
+                    "perskeleton",
+                  )}`
+                : ""
+            }
+          </div>
+          ${
+            a
+              ? `<div class="row"><button class="btn" id="btn-pack" title="Texture Packer Settings"><span>팩 설정…</span></button></div>
+                 <div class="pack-sum" title="${esc(packSummary(o.pack, o.unity))}">${esc(packSummary(o.pack, o.unity))}</div>
+                 ${o.packSource === "imagefolders" ? `<div class="hint">이미지 폴더의 PNG 를 모두 묶습니다${o.pack.combineSubdirectories ? "" : "(하위 폴더마다 페이지를 따로 씁니다)"}. 폴더 안 pack.json 은 읽지 않습니다.</div>` : ""}`
+              : ""
+          }
         </div>
       </div>`,
     )}
@@ -792,21 +863,107 @@ function bindSettings() {
     const v = (e.target as HTMLSelectElement).value;
     setOpt({ nonessential: v === "auto" ? null : v === "on" });
   };
-  $<HTMLSelectElement>("#opt-skel-ext").onchange = (e) => setOpt({ skelExt: (e.target as HTMLSelectElement).value });
-  s.querySelectorAll<HTMLButtonElement>("[data-atlas]").forEach((b) => (b.onclick = () => setOpt({ atlas: b.dataset.atlas === "on" })));
-  $<HTMLButtonElement>("#btn-pack").onclick = editPack;
-  const chk = (id: string, key: keyof ExportOptions) => ($<HTMLInputElement>(id).onchange = (e) => setOpt({ [key]: (e.target as HTMLInputElement).checked }));
+  $<HTMLInputElement>("#opt-atlas").onchange = (e) => setOpt({ atlas: (e.target as HTMLInputElement).checked });
+  const onSel = (id: string, fn: (v: string) => void) => {
+    const el = document.getElementById(id) as HTMLSelectElement | null;
+    if (el) el.onchange = () => fn(el.value);
+  };
+  onSel("opt-pack-source", (v) => setOpt({ packSource: v as ExportOptions["packSource"] }));
+  onSel("opt-pack-target", (v) => setOpt({ packTarget: v as ExportOptions["packTarget"] }));
+  onSel("opt-skel-ext", (v) => setOpt({ skelExt: v }));
+  onSel("opt-json-format", (v) => setOpt({ jsonFormat: v as ExportOptions["jsonFormat"] }));
+  const jsonExt = document.getElementById("opt-json-ext") as HTMLInputElement | null;
+  if (jsonExt)
+    jsonExt.onchange = () => {
+      const v = jsonExt.value.trim().replace(/[\\/:*?"<>|]/g, "");
+      setOpt({ jsonExt: v ? (v.startsWith(".") ? v : `.${v}`) : ".json" });
+    };
+  const packBtn = document.getElementById("btn-pack");
+  if (packBtn) packBtn.onclick = editPack;
+  const chk = (id: string, key: keyof ExportOptions) => {
+    const el = document.querySelector<HTMLInputElement>(id);
+    if (el) el.onchange = () => setOpt({ [key]: el.checked });
+  };
   chk("#opt-clean", "clean");
-  $<HTMLButtonElement>("#btn-img").onclick = pickImages;
-  const reset = document.getElementById("btn-img-reset");
-  if (reset) reset.onclick = () => setOpt({ imagesDir: null });
+  chk("#opt-pretty", "prettyPrint");
+  chk("#opt-export-all", "exportAll");
+  chk("#opt-warnings", "warnings");
 }
 
-$("#btn-preset").onclick = () => {
-  setOpt({ ...PRESET_ANC });
-  toast("info", "팀 설정을 적용했습니다", "Binary · 비필수 데이터 · 애니메이션 정리 · PMA 끔 · 블리드 · 에일리어스 · 2048 · .skel.bytes · .atlas.txt");
+// ───────────────────────────────────────── Spine 내보내기 설정 파일
+
+interface ImportedSettings {
+  options: ExportOptions;
+  output: string | null;
+  /** JSON 내보내기의 Version(예: "4.1"). */
+  version: string | null;
+  notes: string[];
+}
+
+/** Spine 설정의 "4.2" 같은 버전 → 이 앱의 버전 칸 값. 프로젝트와 같은 계열이면 비운다(프로젝트 버전 따름). */
+function versionFromSpine(v: string | null): string | null {
+  const m = v ? /^(\d+)\.(\d+)(?:\.(\d+))?/.exec(v.trim()) : null;
+  if (!m) return null;
+  if (m[3] !== undefined) return `${m[1]}.${m[2]}.${m[3]}`;
+  const p = project ? parseVersion(project.formatVersion) : null;
+  if (p && p[0] === Number(m[1]) && p[1] === Number(m[2])) return "";
+  return ["4.3.26", "4.2.43", "4.1.24", "4.0.64"].find((x) => x.startsWith(`${m[1]}.${m[2]}.`)) ?? `${m[1]}.${m[2]}.0`;
+}
+
+$("#btn-settings-load").onclick = async () => {
+  const f = await openDialog({
+    multiple: false,
+    title: "Spine 내보내기 설정 불러오기",
+    defaultPath: project ? dirname(project.path) : undefined,
+    filters: [{ name: "Spine 내보내기 설정", extensions: ["json"] }],
+  });
+  if (typeof f !== "string") return;
+  try {
+    const got = await invoke<ImportedSettings>("load_export_settings", { path: f, options });
+    // Rust 가 모르는 앱 설정(Unity 형식)은 확장자로 다시 정한다
+    const o = got.options;
+    const unity = o.atlas && o.pack.atlasExtension === UNITY_ATLAS_EXT && (o.format === "json" || o.skelExt === UNITY_SKEL_EXT);
+    const patch: Partial<ExportOptions> = { ...o, unity, skelBeforeUnity: options.skelBeforeUnity };
+    const ver = versionFromSpine(got.version);
+    patch.version = ver ?? options.version;
+    setOpt(patch);
+    const kind = o.format === "json" ? "JSON" : "바이너리";
+    const acts = got.output
+      ? [
+          {
+            label: "출력 폴더도 적용",
+            run: () => {
+              prefs.customOut = got.output!;
+              prefs.outMode = "custom";
+              save("sfe.prefs", prefs);
+              renderSettings();
+            },
+          },
+        ]
+      : undefined;
+    const sub = [got.output ? `설정에 적힌 출력 폴더: ${got.output}` : "", ...got.notes].filter(Boolean).join("\n");
+    toast(got.notes.length ? "warning" : "success", `Spine ${kind} 내보내기 설정을 불러왔습니다`, sub || undefined, acts, got.output || got.notes.length ? 12000 : 4200);
+  } catch (e) {
+    toast("error", "설정을 불러올 수 없습니다", String(e), undefined, 8000);
+  }
 };
-$("#btn-defaults").onclick = () => setOpt({ ...DEFAULTS, version: options.version });
+
+$("#btn-settings-save").onclick = async () => {
+  const kind = options.format === "json" ? "json" : "binary";
+  const f = await saveDialog({
+    title: "Spine 내보내기 설정 저장",
+    defaultPath: project ? joinPath(dirname(project.path), `${kind}.export.json`) : `${kind}.export.json`,
+    filters: [{ name: "Spine 내보내기 설정", extensions: ["json"] }],
+  });
+  if (typeof f !== "string") return;
+  try {
+    await invoke("save_export_settings", { path: f, options, input: project?.path ?? null, output: outDir() });
+    const both = options.format === "both" ? " 형식이 «둘 다»라 바이너리 설정으로 저장했습니다(Spine 설정 파일은 한 형식만 담습니다)." : "";
+    toast("success", "Spine 내보내기 설정을 저장했습니다", `${f}${both}`, undefined, both ? 9000 : 4200);
+  } catch (e) {
+    toast("error", "설정을 저장할 수 없습니다", String(e), undefined, 8000);
+  }
+};
 
 let packOpen = false;
 async function editPack() {
@@ -837,11 +994,6 @@ async function pickOut() {
     save("sfe.prefs", prefs);
     renderSettings();
   }
-}
-
-async function pickImages() {
-  const dir = await openDialog({ directory: true, title: "이미지 폴더", defaultPath: project ? dirname(project.path) : undefined });
-  if (typeof dir === "string") setOpt({ imagesDir: dir });
 }
 
 // ───────────────────────────────────────── 상태 줄
@@ -975,7 +1127,7 @@ function showResults(rows: ExportProgress[], sum: ExportSummary) {
   back.innerHTML = `<div class="modal" role="dialog">
     <div class="m-head">내보내기 결과<div class="sub">${sum.succeeded}개 성공 · ${sum.failed}개 실패 · ${(sum.elapsedMs / 1000).toFixed(2)}초</div></div>
     <div class="m-body">${rows
-      .sort((a, b) => Number(a.ok) - Number(b.ok) || a.index - b.index)
+      .sort((a, b) => Number(a.ok) - Number(b.ok) || (a.index ?? Infinity) - (b.index ?? Infinity))
       .map(
         (r) => `<div class="res-row">${(r.ok ? icons.check : icons.error).replace("<svg", `<svg class="ic ${r.ok ? "ok" : "fail"}"`)}
         <div style="min-width:0;flex:1"><div class="nm">${esc(r.skeleton)}</div>
@@ -1024,7 +1176,7 @@ async function runExport() {
   const un = await listen<ExportProgress>("export-progress", (e) => {
     const p = e.payload;
     rows.push(p);
-    exportState.set(p.index, p.ok ? "ok" : "fail");
+    if (p.index !== null) exportState.set(p.index, p.ok ? "ok" : "fail");
     setStatus(`내보내는 중… ${p.done}/${p.total}`, p.done / p.total);
     const row = document.querySelector(`.sk-row[data-i="${p.index}"] .state`);
     if (row) row.outerHTML = p.ok ? `<span class="state ok" title="내보냄">${icons.check}</span>` : `<span class="state fail" title="실패">${icons.error}</span>`;

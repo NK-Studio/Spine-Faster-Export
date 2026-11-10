@@ -190,6 +190,8 @@ pub struct Reader<'a> {
     slots: Vec<Option<NodeId>>,
     slot_index: HashMap<NodeId, usize>,
     skin_nodes: Vec<Option<NodeId>>,
+    /// Export 체크가 꺼진 첨부도 내보낸다(Spine «Export all»).
+    export_all: bool,
 }
 
 /// 프로젝트의 스켈레톤 목록(이름, 노드). 없으면 오류.
@@ -227,7 +229,14 @@ impl<'a> Reader<'a> {
             slots: Vec::new(),
             slot_index: HashMap::new(),
             skin_nodes: Vec::new(),
+            export_all: false,
         }
+    }
+
+    /// Export 체크가 꺼진 첨부도 내보낼지(Spine «Export all»).
+    pub fn export_all(mut self, on: bool) -> Self {
+        self.export_all = on;
+        self
     }
 
     // ------------------------------------------------------------ 작은 도우미
@@ -733,7 +742,7 @@ impl<'a> Reader<'a> {
     /// 첨부의 Export 체크(태그 5). 꺼져 있으면 첨부와 그 키가 내보내기에서 빠진다.
     fn exported(&self, a: Option<NodeId>) -> R<bool> {
         let a = a.ok_or_else(null_node)?;
-        Ok(self.cls(a) == "Placeholder" || self.i(Some(a), 5, 1) != 0)
+        Ok(self.export_all || self.cls(a) == "Placeholder" || self.i(Some(a), 5, 1) != 0)
     }
 
     fn att_slot(&self, a: Option<NodeId>) -> Option<NodeId> {
