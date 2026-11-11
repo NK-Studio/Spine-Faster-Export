@@ -23,7 +23,7 @@ Spine 프로그램 없이 `.spine` 프로젝트에서 고른 스켈레톤만 런
 
 아래 **설정 불러오기… / 설정 저장…** 은 Spine 내보내기 대화상자의 Save 로 만든 설정 JSON(`"class": "export-json"` · `"export-binary"`)을 읽고 씁니다. 출력 폴더는 불러온 뒤 알림의 «출력 폴더도 적용»을 눌러야 바뀝니다.
 
-팩 설정 대화상자의 **Load / Save** 는 Spine 이 쓰는 `pack.json` 을 그대로 읽고 씁니다. 출력 형식은 PNG 만 되고, *Auto scale* 은 지원하지 않습니다. *Legacy output* 을 켜면 3.8 이하 런타임이 읽는 옛 atlas 형식으로 씁니다(런타임 버전을 3.8 로 고르면 Spine 처럼 꺼져 있어도 옛 형식으로 씁니다). 메시만 쓰는 이미지는 패킹 방식과 상관없이 Spine 처럼 메시 UV 범위로 자릅니다. *Packing: Polygons* 는 메시만 쓰는 이미지를 메시가 덮는 모양대로 묶습니다(영역 첨부가 쓰는 이미지는 사각형 그대로이고, 페이지 안 배치는 Spine 과 다릅니다). Spine 처럼 다각형 모양은 사각형보다 1픽셀 가깝게 놓습니다(여백 2 면 모양 사이 빈 픽셀이 1줄 이상). *Combine subdirectories* 는 «이미지 폴더»로 묶을 때만 씁니다(폴더 안 `pack.json` 은 읽지 않습니다). *Format* 은 atlas 의 `format:` 줄만 바꾸고 PNG 는 RGBA 로 저장합니다.
+팩 설정 대화상자의 **Load / Save** 는 Spine 이 쓰는 `pack.json` 을 그대로 읽고 씁니다. 출력 형식은 PNG 만 되고, *Auto scale* 은 지원하지 않습니다. *Legacy output* 을 켜면 3.8 이하 런타임이 읽는 옛 atlas 형식으로 씁니다(런타임 버전을 3.8 로 고르면 Spine 처럼 꺼져 있어도 옛 형식으로 씁니다). 메시만 쓰는 이미지는 패킹 방식과 상관없이 Spine 처럼 메시 UV 범위로 자릅니다. *Packing: Polygons* 는 메시만 쓰는 이미지를 메시가 덮는 모양대로 묶습니다(영역 첨부가 쓰는 이미지는 사각형 그대로이고, 페이지 안 배치는 Spine 과 다릅니다). Spine 처럼 다각형 모양은 사각형보다 1픽셀 가깝게 놓습니다(여백 2 면 모양 사이 빈 픽셀이 1줄 이상). *Combine subdirectories* 는 «이미지 폴더»로 묶을 때만 씁니다. «이미지 폴더»로 묶으면 Spine 처럼 폴더 안 `pack.json` 을 읽습니다: 폴더의 설정은 가장 가까운 윗폴더의 설정(이미지 폴더 자신은 내보내기 설정)에 그 폴더의 `pack.json` 을 덮은 것이고, 폴더마다 페이지를 따로 쓰며 페이지 머리말(`filter` · `format` · `repeat` · `pma` · Legacy output)도 그 폴더 설정을 따릅니다. 합치기를 켠 폴더도 `pack.json` 이 있는 하위 폴더는 따로 묶고, `"ignore": true` 인 폴더는 넣지 않습니다. 폴더마다 배율이 다르면 그 폴더는 자기 접미사의 atlas 에만 들어갑니다. 페이지는 폴더 나무를 깊이 우선(부모 먼저, 이름은 Ordinal 순)으로 씁니다. 새 형식 atlas 는 Spine 처럼 필터가 Nearest, Nearest 면 `filter:` 줄을 쓰지 않습니다. *Format* 은 atlas 의 `format:` 줄만 바꾸고 PNG 는 RGBA 로 저장합니다.
 
 ## 구조
 

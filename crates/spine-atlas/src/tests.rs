@@ -645,3 +645,129 @@ fn legacy_output_reads_like_38() {
     assert!(std::panic::catch_unwind(|| parse_like_38(&new.atlas_text)).is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// atlas 텍스트 → [(페이지 이름, 머리말 줄(size 빼고), 영역 이름)].
+fn page_layout(text: &str) -> Vec<(String, Vec<String>, Vec<String>)> {
+    let mut pages: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+    let mut fresh = true;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            fresh = true;
+        } else if fresh {
+            pages.push((line.to_string(), Vec::new(), Vec::new()));
+            fresh = false;
+        } else if let Some(p) = pages.last_mut() {
+            let is_key = line.contains(':') && !line.starts_with(' ');
+            if is_key && p.2.is_empty() {
+                if !line.starts_with("size:") {
+                    p.1.push(line.to_string());
+                }
+            } else if !line.starts_with(' ') && !["bounds:", "offsets:", "rotate:", "index:"].iter().any(|k| line.starts_with(k)) {
+                p.2.push(line.to_string());
+            }
+        }
+    }
+    pages
+}
+
+fn folder_tree(tag: &str) -> PathBuf {
+    let dir = temp_dir(tag);
+    let px = image(12, 10, 1, 9);
+    for n in ["root", "a/x", "a/c/y", "a/d/z", "b/w", "a b/v", "e/skip", "e/f/skip2"] {
+        write(&dir, n, 12, 10, &px);
+    }
+    std::fs::write(dir.join("a/pack.json"), r#"{"filterMin":"Nearest","filterMag":"Nearest","paddingX":8}"#).unwrap();
+    std::fs::write(dir.join("a/c/pack.json"), r#"{"format":"RGBA4444"}"#).unwrap();
+    std::fs::write(dir.join("e/pack.json"), r#"{"ignore":true}"#).unwrap();
+    dir
+}
+
+/// Spine 4.2.43 명령줄 패커와 대조한 규칙: 폴더 안 pack.json 은 부모 설정을 물려받아 덮고, 설정이 있는 폴더는 따로 페이지를 쓰며,
+/// 페이지 머리말은 그 폴더 설정을 따른다. 폴더 순서는 깊이 우선(이름 Ordinal 순).
+#[test]
+fn folder_pack_json() {
+    let dir = folder_tree("folderpack");
+    let m = SkeletonModel::default();
+    let base = AtlasSettings { pma: false, rotation: false, ..Default::default() };
+    let run = |combine: bool| {
+        let s = AtlasSettings { combine_subdirectories: combine, ..base.clone() };
+        let sources = folder_sources(&m, &dir, &s).unwrap();
+        assert!(sources.iter().all(|src| !src.name.starts_with("e/")), "ignore 폴더는 빠진다");
+        let mut out = pack_sources_scales(&sources, "t", &s).unwrap();
+        assert_eq!(out.len(), 1);
+        out.remove(0).1.output.atlas_text
+    };
+    let names = |l: &[(String, Vec<String>, Vec<String>)]| l.iter().map(|p| p.2.clone()).collect::<Vec<_>>();
+    let lin = vec!["filter:Linear,Linear".to_string()];
+
+    // 합치기를 끄면 폴더마다 페이지: 이미지 폴더 자신, a, a/c, a/d, "a b", b (a 의 하위 폴더가 "a b" 보다 먼저)
+    let text = run(false);
+    let l = page_layout(&text);
+    assert_eq!(names(&l), [vec!["root"], vec!["a/x"], vec!["a/c/y"], vec!["a/d/z"], vec!["a b/v"], vec!["b/w"]], "{text}");
+    assert_eq!(l[0].1, lin);
+    assert!(l[1].1.is_empty(), "Nearest 면 filter 줄이 없다: {text}");
+    assert_eq!(l[2].1, ["format:RGBA4444"], "a/c 는 a 의 Nearest 를 물려받는다: {text}");
+    assert!(l[3].1.is_empty(), "pack.json 없는 a/d 는 a 의 설정: {text}");
+    assert_eq!(l[4].1, lin);
+    // 여백 8 은 a 와 그 아래에만
+    let rect = |n: &str| rects(&text).into_iter().find(|r| r.0 == n).unwrap();
+    assert_eq!((rect("a/x").1, rect("a/c/y").1, rect("b/w").1), (8, 8, 2));
+
+    // 합치기를 켜면 pack.json 이 없는 하위 폴더는 부모 페이지에, 있는 폴더(a, a/c)는 따로
+    let text = run(true);
+    let l = page_layout(&text);
+    assert_eq!(names(&l), [vec!["a b/v", "b/w", "root"], vec!["a/d/z", "a/x"], vec!["a/c/y"]], "{text}");
+    assert_eq!(l[0].1, lin);
+    assert!(l[1].1.is_empty());
+    assert_eq!(l[2].1, ["format:RGBA4444"]);
+    assert_eq!(l.iter().map(|p| p.0.as_str()).collect::<Vec<_>>(), ["t.png", "t_2.png", "t_3.png"]);
+
+    // pack.json 이 합치기를 켜고 끌 수도 있다(그 폴더 아래에만)
+    std::fs::write(dir.join("a/pack.json"), r#"{"combineSubdirectories":true}"#).unwrap();
+    let l = page_layout(&run(false));
+    assert_eq!(names(&l), [vec!["root"], vec!["a/d/z", "a/x"], vec!["a/c/y"], vec!["a b/v"], vec!["b/w"]]);
+
+    // 이미지 폴더 자신의 pack.json 도 준 설정 위에 덮는다
+    std::fs::write(dir.join("pack.json"), r#"{"wrapX":"Repeat"}"#).unwrap();
+    let l = page_layout(&run(false));
+    assert!(l.iter().all(|p| p.1.contains(&"repeat:x".to_string())), "{l:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 폴더마다 배율이 다르면 그 폴더는 자기 접미사의 atlas 에만 들어간다(Spine 도 같다). Legacy output 도 페이지마다.
+#[test]
+fn folder_pack_json_scales_and_legacy() {
+    let dir = temp_dir("folderscale");
+    let px = image(20, 16, 0, 3);
+    for n in ["root", "half/h", "old/o"] {
+        write(&dir, n, 20, 16, &px);
+    }
+    std::fs::write(dir.join("half/pack.json"), r#"{"scale":[1,0.5],"scaleSuffix":["","@h"]}"#).unwrap();
+    std::fs::write(dir.join("old/pack.json"), r#"{"legacyOutput":true}"#).unwrap();
+    let s = AtlasSettings { pma: false, ..Default::default() };
+    let sources = folder_sources(&SkeletonModel::default(), &dir, &s).unwrap();
+    let out = pack_sources_scales(&sources, "t", &s).unwrap();
+    assert_eq!(out.iter().map(|o| o.0.as_str()).collect::<Vec<_>>(), ["", "@h"]);
+    let full = &out[0].1.output.atlas_text;
+    let l = page_layout(full);
+    assert_eq!(l.iter().map(|p| p.2.clone()).collect::<Vec<_>>(), [vec!["root"], vec!["half/h"], vec!["old/o"]], "{full}");
+    assert!(full.contains("bounds:2,2,20,16\n\nt_3.png\nsize: 24, 20\nformat: RGBA8888\nfilter: Linear, Linear\nrepeat: none\nold/o\n  rotate: false\n"), "{full}");
+    let half = &out[1].1.output.atlas_text;
+    assert!(half.starts_with("t@h.png\nsize:14,12\nfilter:Linear,Linear\nscale:0.5\nhalf/h\n"), "{half}");
+    assert_eq!(out[1].1.output.pages.len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn merge_pack_json_inherits() {
+    let base = AtlasSettings { padding_x: 7, grid: true, ..Default::default() }.normalize();
+    let s = merge_pack_json(&base, r#"{"format":"RGB565","unknownKey":1}"#).unwrap();
+    assert_eq!((s.padding_x, s.grid, s.format), (7, true, PixelFormat::RGB565));
+    assert!(!merge_pack_json(&base, r#"{"packing":"rectangles"}"#).unwrap().grid);
+    assert!(!merge_pack_json(&base, r#"{"grid":false}"#).unwrap().grid);
+    let poly = merge_pack_json(&AtlasSettings::default(), r#"{"packing":"polygons"}"#).unwrap();
+    assert!(poly.polygons());
+    assert!(merge_pack_json(&poly, r#"{"ignore":true}"#).unwrap().polygons());
+    assert!(merge_pack_json(&base, "[1]").is_err());
+    assert!(merge_pack_json(&base, r#"{"paddingX":"x"}"#).is_err());
+}
