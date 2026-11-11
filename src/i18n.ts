@@ -147,7 +147,7 @@ const en: Record<string, string> = {
   "스켈레톤별: 스켈레톤 이름으로 하나씩 · 싱글: 고른 스켈레톤의 이미지를 프로젝트 파일 이름의 atlas 하나에":
     "Per skeleton: one atlas per skeleton name · Single: images of all checked skeletons in one atlas named after the project file",
   "팩 설정…": "Pack Settings…",
-  "이미지 폴더의 PNG 를 모두 묶습니다{sub}. 폴더 안 pack.json 은 읽지 않습니다.": "Packs every PNG in the images folder{sub}. pack.json files in the folder are not read.",
+  "이미지 폴더의 PNG 를 모두 묶습니다{sub}. 폴더 안 pack.json 은 Spine 처럼 그 폴더의 설정으로 읽습니다.": "Packs every PNG in the images folder{sub}. A pack.json in a folder sets that folder's settings, as in Spine.",
   "(하위 폴더마다 페이지를 따로 씁니다)": " (separate pages per subfolder)",
   "첫 번째로 고른 스켈레톤 기준": "Based on the first checked skeleton",
   "만들 파일": "Output files",
@@ -303,8 +303,8 @@ const en: Record<string, string> = {
   "배율별 파일 이름 접미사(예: @2x)": "File name suffix per scale (e.g. @2x)",
   "spine-unity 가 가져오는 형식입니다": "The format spine-unity imports",
   "spine-unity 가져오기 형식: atlas 는 {atlas}, 바이너리는 {skel}": "spine-unity import format: {atlas} for atlases, {skel} for binaries",
-  "«이미지 폴더»로 묶을 때: 켜면 하위 폴더의 이미지를 같은 페이지에 섞어 묶고, 끄면 폴더마다 페이지를 따로 씁니다. «첨부 이미지»로 묶을 때는 쓰지 않습니다":
-    "When packing “Image folders”: on mixes subfolder images on the same pages, off writes separate pages per folder. Not used when packing attachments",
+  "«이미지 폴더»로 묶을 때: 켜면 하위 폴더의 이미지를 같은 페이지에 섞어 묶고, 끄면 폴더마다 페이지를 따로 씁니다. pack.json 이 있는 하위 폴더는 늘 따로 묶습니다. «첨부 이미지»로 묶을 때는 쓰지 않습니다":
+    "When packing “Image folders”: on mixes subfolder images on the same pages, off writes separate pages per folder. Subfolders with their own pack.json are always packed separately. Not used when packing attachments",
   "영역 이름에서 폴더를 뺍니다": "Removes folders from region names",
   "이름 끝의 _숫자를 index 로 씁니다": "Uses a trailing _number in the name as the index",
   "덜 촘촘하지만 빨리 묶습니다": "Packs faster but less tightly",

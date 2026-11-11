@@ -246,7 +246,7 @@ export function openPackerDialog(
           </div>
           <div class="pk-checks">
             ${chk("unity", "Unity (spine-unity)", t("spine-unity 가져오기 형식: atlas 는 {atlas}, 바이너리는 {skel}", { atlas: UNITY_ATLAS_EXT, skel: UNITY_SKEL_EXT }), true, unity)}
-            ${chk("combineSubdirectories", t("하위 폴더 합치기"), t("«이미지 폴더»로 묶을 때: 켜면 하위 폴더의 이미지를 같은 페이지에 섞어 묶고, 끄면 폴더마다 페이지를 따로 씁니다. «첨부 이미지»로 묶을 때는 쓰지 않습니다"))}
+            ${chk("combineSubdirectories", t("하위 폴더 합치기"), t("«이미지 폴더»로 묶을 때: 켜면 하위 폴더의 이미지를 같은 페이지에 섞어 묶고, 끄면 폴더마다 페이지를 따로 씁니다. pack.json 이 있는 하위 폴더는 늘 따로 묶습니다. «첨부 이미지»로 묶을 때는 쓰지 않습니다"))}
             ${chk("flattenPaths", t("경로 병합"), t("영역 이름에서 폴더를 뺍니다"))}
             ${chk("useIndexes", t("인덱스 사용"), t("이름 끝의 _숫자를 index 로 씁니다"))}
             ${chk("fast", t("빠르게"), t("덜 촘촘하지만 빨리 묶습니다"))}

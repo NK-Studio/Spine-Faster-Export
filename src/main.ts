@@ -798,7 +798,7 @@ function renderSettings() {
             a
               ? `<div class="row"><button class="btn" id="btn-pack" title="Texture Packer Settings"><span>${t("팩 설정…")}</span></button></div>
                  <div class="pack-sum" title="${esc(packSummary(o.pack, o.unity))}">${esc(packSummary(o.pack, o.unity))}</div>
-                 ${o.packSource === "imagefolders" ? `<div class="hint">${t("이미지 폴더의 PNG 를 모두 묶습니다{sub}. 폴더 안 pack.json 은 읽지 않습니다.", { sub: o.pack.combineSubdirectories ? "" : t("(하위 폴더마다 페이지를 따로 씁니다)") })}</div>` : ""}`
+                 ${o.packSource === "imagefolders" ? `<div class="hint">${t("이미지 폴더의 PNG 를 모두 묶습니다{sub}. 폴더 안 pack.json 은 Spine 처럼 그 폴더의 설정으로 읽습니다.", { sub: o.pack.combineSubdirectories ? "" : t("(하위 폴더마다 페이지를 따로 씁니다)") })}</div>` : ""}`
               : ""
           }
         </div>

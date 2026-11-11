@@ -15,6 +15,9 @@ mod resize;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use unicode_normalization::UnicodeNormalization;
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -149,8 +152,11 @@ pub struct AtlasSettings {
     pub scale_resampling: Vec<String>,
     // Options
     pub atlas_extension: String,
-    /// 이 앱은 스켈레톤 첨부로 묶으므로 쓰지 않는다(Spine `pack.json` 호환을 위해 둔다).
+    /// «이미지 폴더»로 묶을 때: 하위 폴더를 이 폴더의 페이지에 함께 묶는다(자기 `pack.json` 이 있는 하위 폴더는 따로).
     pub combine_subdirectories: bool,
+    /// 이 폴더(와 하위 폴더)의 이미지를 묶지 않는다. 폴더 안 `pack.json` 에만 쓰는 값이다.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ignore: bool,
     /// 영역 이름에서 폴더를 뺀다.
     pub flatten_paths: bool,
     /// 이름 끝의 `_숫자` 를 `index:` 로 쓴다.
@@ -205,6 +211,7 @@ impl Default for AtlasSettings {
             scale_resampling: vec!["bicubic".into()],
             atlas_extension: ".atlas".into(),
             combine_subdirectories: false,
+            ignore: false,
             flatten_paths: false,
             use_indexes: false,
             fast: false,
@@ -1138,9 +1145,9 @@ pub fn encode_png(page: &AtlasPage) -> Vec<u8> {
 
 /// [`pack`] 과 같고, 빠지거나 뺀 영역 이름도 돌려준다.
 pub fn pack_detailed(model: &SkeletonModel, images_dir: &Path, name: &str, settings: &AtlasSettings) -> SpineResult<PackResult> {
-    let (scale, suffix, method) = settings.scale_list().remove(0);
+    let (_, suffix) = settings.scales().remove(0);
     let sources = attachment_sources(model, images_dir)?;
-    pack_at(&sources, &format!("{name}{suffix}"), settings, scale, method)
+    pack_at(&sources, &format!("{name}{suffix}"), settings, &suffix)
 }
 
 /// 배율마다 하나씩: (접미사, 결과). 파일 이름은 `name + 접미사`.
@@ -1149,13 +1156,25 @@ pub fn pack_scales(model: &SkeletonModel, images_dir: &Path, name: &str, setting
 }
 
 /// [`pack_scales`] 와 같지만 묶을 이미지를 직접 준다(이미지 폴더째 묶기, 여러 스켈레톤을 한 atlas 로).
+/// 폴더 설정([`Source::settings`])이 있는 이미지는 그 설정과 배율로 묶는다. atlas 는 접미사마다 하나이고
+/// (settings 의 배율 다음에 폴더에만 있는 배율 순), 폴더는 자기 배율 목록에 그 접미사가 있을 때만 들어간다.
 pub fn pack_sources_scales(sources: &[Source], name: &str, settings: &AtlasSettings) -> SpineResult<Vec<(String, PackResult)>> {
     settings.check()?;
-    settings
-        .scale_list()
-        .into_iter()
-        .map(|(scale, suffix, method)| pack_at(sources, &format!("{name}{suffix}"), settings, scale, method).map(|r| (suffix, r)))
-        .collect()
+    let mut suffixes: Vec<String> = settings.scales().into_iter().map(|(_, s)| s).collect();
+    let mut seen: Vec<&AtlasSettings> = Vec::new();
+    for s in sources.iter().filter_map(|s| s.settings.as_deref()) {
+        if seen.contains(&s) {
+            continue;
+        }
+        s.check()?;
+        seen.push(s);
+        for (_, sfx) in s.scales() {
+            if !suffixes.contains(&sfx) {
+                suffixes.push(sfx);
+            }
+        }
+    }
+    suffixes.into_iter().map(|suffix| pack_at(sources, &format!("{name}{suffix}"), settings, &suffix).map(|r| (suffix, r))).collect()
 }
 
 /// atlas 에 넣을 이미지 하나.
@@ -1167,8 +1186,11 @@ pub struct Source {
     pub path: PathBuf,
     /// 메시가 쓰는 이미지(여백을 잘라내지 않는다).
     pub mesh: bool,
-    /// 페이지를 따로 쓰는 묶음(이미지 폴더의 하위 폴더). None 이면 모두 한데 묶는다.
+    /// 페이지를 따로 쓰는 묶음(이미지 폴더 안 폴더 경로, 끝에 `/`, 이미지 폴더 자신은 ""). None 이면 이미지 폴더 자신과 같은 묶음.
+    /// 묶음은 Spine 처럼 폴더 나무를 깊이 우선(이름은 Ordinal 순, 부모 먼저)으로 쓴다.
     pub group: Option<String>,
+    /// 이 묶음의 설정(폴더 안 `pack.json` 을 부모 설정에 덮은 것). None 이면 묶을 때 준 설정.
+    pub settings: Option<Arc<AtlasSettings>>,
     /// 다각형 패킹용: 이 이미지를 메시만 쓸 때 그 메시들의 삼각형(UV 0~1, 왼쪽 위 원점, 삼각형마다 u0,v0,u1,v1,u2,v2).
     /// 비어 있으면 사각형으로 묶는다.
     pub tris: Vec<[f64; 6]>,
@@ -1203,31 +1225,87 @@ pub fn attachment_sources(model: &SkeletonModel, images_dir: &Path) -> SpineResu
             tris: shapes.remove(&name).unwrap_or_default(),
             name,
             group: None,
+            settings: None,
         })
         .collect())
 }
 
-/// Pack source «Image folders»: 스켈레톤 이미지 폴더의 PNG 를 하위 폴더까지 모두.
-/// combine 이 꺼져 있으면 폴더마다 페이지를 따로 쓴다(Combine subdirectories).
-pub fn folder_sources(model: &SkeletonModel, images_dir: &Path, combine: bool) -> SpineResult<Vec<Source>> {
+/// Spine `pack.json` 을 base 위에 덮는다: 파일에 있는 키만 바꾸고 나머지는 base 를 물려받는다
+/// (Spine 은 폴더 안 `pack.json` 을 가장 가까운 윗폴더의 설정에 덮어 읽는다).
+pub fn merge_pack_json(base: &AtlasSettings, json: &str) -> SpineResult<AtlasSettings> {
+    let bad = |e: serde_json::Error| SpineError::Format(format!("pack.json 을 읽지 못했습니다: {e}"));
+    let over: serde_json::Value = serde_json::from_str(json).map_err(bad)?;
+    let Some(over) = over.as_object() else {
+        return Err(SpineError::Format("pack.json 은 JSON 객체여야 합니다".into()));
+    };
+    let mut value = serde_json::to_value(base.clone().for_save()).map_err(bad)?;
+    let map = value.as_object_mut().expect("설정은 객체로 바뀐다");
+    // 격자는 `grid` 와 `packing` 두 키로 적힌다: 한쪽만 있으면 그쪽을 따른다
+    match (over.contains_key("grid"), over.contains_key("packing")) {
+        (true, false) if !base.polygons() => {
+            map.insert("packing".into(), "rectangles".into());
+        }
+        (false, true) => {
+            map.insert("grid".into(), false.into());
+        }
+        _ => {}
+    }
+    for (k, v) in over {
+        map.insert(k.clone(), v.clone());
+    }
+    let merged: AtlasSettings = serde_json::from_value(value).map_err(bad)?;
+    Ok(AtlasSettings { legacy_editor38: base.legacy_editor38, ..merged.normalize() })
+}
+
+fn read_pack_json(dir: &Path, base: &AtlasSettings) -> SpineResult<Option<AtlasSettings>> {
+    let file = dir.join("pack.json");
+    if !file.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&file)?;
+    merge_pack_json(base, &text).map(Some).map_err(|e| SpineError::Format(format!("{}: {e}", file.display())))
+}
+
+/// Pack source «Image folders»: 스켈레톤 이미지 폴더의 PNG 를 하위 폴더까지 모두. Spine 처럼 폴더 안 `pack.json` 을 읽는다.
+/// - 폴더의 설정은 가장 가까운 윗폴더의 설정(이미지 폴더 자신은 settings)에 그 폴더의 `pack.json` 을 덮은 것이다.
+/// - 폴더마다 페이지를 따로 쓴다. Combine subdirectories 가 켜진 폴더는 하위 폴더를 자기 페이지에 함께 묶되,
+///   `pack.json` 이 있는 하위 폴더(와 그 아래)는 따로 묶는다.
+/// - `"ignore": true` 인 폴더의 이미지는 넣지 않는다(하위 폴더는 자기 `pack.json` 이 풀지 않으면 함께 빠진다).
+pub fn folder_sources(model: &SkeletonModel, images_dir: &Path, settings: &AtlasSettings) -> SpineResult<Vec<Source>> {
     need_images_dir(images_dir)?;
     let (_, mesh) = region_names(model);
     let mut shapes = mesh_shapes(model);
+    let root = Arc::new(read_pack_json(images_dir, settings)?.unwrap_or_else(|| settings.clone()));
     let mut out = Vec::new();
-    let mut stack = vec![(images_dir.to_path_buf(), String::new())];
-    while let Some((dir, prefix)) = stack.pop() {
+    // (폴더, 폴더 안 경로, 묶음 경로, 묶음 설정)
+    let mut stack = vec![(images_dir.to_path_buf(), String::new(), String::new(), root)];
+    while let Some((dir, prefix, group, unit)) = stack.pop() {
         for entry in std::fs::read_dir(&dir)?.filter_map(|e| e.ok()) {
             let path = entry.path();
-            let Some(file) = path.file_name().and_then(|f| f.to_str()).map(str::to_owned) else { continue };
+            // 영역 이름은 NFC 로: macOS 는 한글 파일 이름을 NFD 로 돌려주지만 Spine 은 NFC 로 쓰고, 첨부 이름도 NFC 다
+            let Some(file) = path.file_name().and_then(|f| f.to_str()).map(|f| f.nfc().collect::<String>()) else { continue };
             if file.starts_with('.') {
                 continue;
             }
             if path.is_dir() {
-                stack.push((path, format!("{prefix}{file}/")));
+                let sub = format!("{prefix}{file}/");
+                match read_pack_json(&path, &unit)? {
+                    Some(own) => stack.push((path, sub.clone(), sub, Arc::new(own))),
+                    None if unit.combine_subdirectories && !unit.ignore => stack.push((path, sub, group.clone(), unit.clone())),
+                    None => stack.push((path, sub.clone(), sub, unit.clone())),
+                }
+            } else if unit.ignore {
+                continue;
             } else if let Some(stem) = file.strip_suffix(".png").or_else(|| file.strip_suffix(".PNG")) {
                 let name = format!("{prefix}{stem}");
-                let group = (!combine).then(|| prefix.clone());
-                out.push(Source { mesh: mesh.contains(&name), tris: shapes.remove(&name).unwrap_or_default(), name, path, group });
+                out.push(Source {
+                    mesh: mesh.contains(&name),
+                    tris: shapes.remove(&name).unwrap_or_default(),
+                    name,
+                    path,
+                    group: Some(group.clone()),
+                    settings: Some(unit.clone()),
+                });
             }
         }
     }
@@ -1268,18 +1346,25 @@ pub fn merge_sources(lists: Vec<Vec<Source>>) -> (Vec<Source>, Vec<String>) {
     (out, clash)
 }
 
-fn pack_at(sources: &[Source], name: &str, settings: &AtlasSettings, scale: f32, method: Resampling) -> SpineResult<PackResult> {
-    settings.check()?;
-    if sources.is_empty() {
+/// 접미사 suffix 의 atlas 하나를 묶는다. 묶음(폴더)마다 그 설정·배율로 페이지를 만들고 머리말도 그 설정으로 쓴다.
+fn pack_at(sources: &[Source], name: &str, root: &AtlasSettings, suffix: &str) -> SpineResult<PackResult> {
+    root.check()?;
+    // 이 atlas 에 들어갈 이미지와 그 설정·배율: 자기 배율 목록에 이 접미사가 없는 폴더는 뺀다
+    let picked: Vec<(&Source, &AtlasSettings, f32, Resampling)> = sources
+        .iter()
+        .filter_map(|src| {
+            let s = src.settings.as_deref().unwrap_or(root);
+            s.scale_list().into_iter().find(|(_, sfx, _)| sfx == suffix).map(|(scale, _, method)| (src, s, scale, method))
+        })
+        .collect();
+    if picked.is_empty() {
         return Err(SpineError::Format("묶을 이미지가 없습니다".into()));
     }
 
     // 이미지 읽기·잘라내기는 영역마다 독립이라 병렬로 한다(순서는 이름 순 그대로).
-    let (sx, sy) = (settings.strip_whitespace_x, settings.strip_whitespace_y);
-    let polygons = settings.polygons();
-    let loaded: Vec<SpineResult<(Region, bool, bool)>> = sources
+    let loaded: Vec<SpineResult<(Region, bool, bool)>> = picked
         .par_iter()
-        .map(|src| {
+        .map(|&(src, settings, scale, method)| {
             let (rn, path) = (&src.name, &src.path);
             if !path.is_file() {
                 let (r, _) = build_region(rn.clone(), 1, 1, &[0u8; 4], false, false, None, false, settings);
@@ -1294,15 +1379,17 @@ fn pack_at(sources: &[Source], name: &str, settings: &AtlasSettings, scale: f32,
             // 메시만 쓰는 이미지는 패킹 방식과 상관없이 메시가 걸친 범위로 자른다
             let shape = polygon::raster_tris(w as usize, h as usize, &src.tris);
             let strip = !src.mesh || shape.is_some();
-            let (r, blank) = build_region(rn.clone(), w, h, &rgba, strip && sx, strip && sy, shape, polygons, settings);
+            let (sx, sy) = (settings.strip_whitespace_x, settings.strip_whitespace_y);
+            let (r, blank) = build_region(rn.clone(), w, h, &rgba, strip && sx, strip && sy, shape, settings.polygons(), settings);
             Ok((r, false, blank))
         })
         .collect();
     let mut regions = Vec::with_capacity(loaded.len());
-    let mut groups: Vec<&Option<String>> = Vec::with_capacity(loaded.len());
+    // 영역마다 (묶음 경로, 설정, 배율)
+    let mut owners: Vec<(&str, &AtlasSettings, f32)> = Vec::with_capacity(loaded.len());
     let mut missing = Vec::new();
     let mut ignored = Vec::new();
-    for (item, src) in loaded.into_iter().zip(sources) {
+    for (item, &(src, settings, scale, _)) in loaded.into_iter().zip(&picked) {
         let (r, miss, blank) = item?;
         if miss {
             missing.push(r.name.clone());
@@ -1311,63 +1398,42 @@ fn pack_at(sources: &[Source], name: &str, settings: &AtlasSettings, scale: f32,
             continue;
         }
         regions.push(r);
-        groups.push(&src.group);
+        owners.push((src.group.as_deref().unwrap_or(""), settings, scale));
     }
     if regions.is_empty() {
         return Err(SpineError::Format("묶을 이미지가 없습니다(모두 투명해서 뺐습니다)".into()));
     }
 
-    // 같은 그림은 한 자리에: 이름순 첫 영역을 싣고 나머지는 그 자리를 함께 쓴다
-    let mut packed: Vec<usize> = Vec::with_capacity(regions.len());
+    // 묶음(폴더)마다 페이지를 따로 쓴다. Spine 처럼 폴더 나무를 깊이 우선으로: 경로 조각을 Ordinal 순으로 견준다.
+    let mut by_group: std::collections::BTreeMap<Vec<&str>, Vec<usize>> = Default::default();
+    for (i, (group, ..)) in owners.iter().enumerate() {
+        by_group.entry(group.split('/').filter(|c| !c.is_empty()).collect()).or_default().push(i);
+    }
+
+    // 같은 그림은 한 자리에(묶음 안에서): 이름순 첫 영역을 싣고 나머지는 그 자리를 함께 쓴다
     let mut aliases: HashMap<usize, Vec<usize>> = HashMap::new();
-    if settings.alias {
-        let mut first: HashMap<&AliasKey, usize> = HashMap::new();
-        for (i, r) in regions.iter().enumerate() {
-            let rep = *first.entry(r.key.as_ref().unwrap()).or_insert(i);
-            if rep == i {
-                packed.push(i);
-            } else {
-                aliases.entry(rep).or_default().push(i);
+    let mut pages: Vec<(Page, &AtlasSettings, f32)> = Vec::new();
+    for ids in by_group.values() {
+        let (_, settings, scale) = owners[ids[0]];
+        let mut packed: Vec<usize> = Vec::with_capacity(ids.len());
+        if settings.alias {
+            let mut first: HashMap<&AliasKey, usize> = HashMap::new();
+            for &i in ids {
+                let rep = *first.entry(regions[i].key.as_ref().unwrap()).or_insert(i);
+                if rep == i {
+                    packed.push(i);
+                } else {
+                    aliases.entry(rep).or_default().push(i);
+                }
             }
+        } else {
+            packed.extend(ids);
         }
-    } else {
-        packed.extend(0..regions.len());
+        let group_pages = pack_group(&mut regions, &packed, settings)?;
+        pages.extend(group_pages.into_iter().map(|p| (p, settings, scale)));
     }
     for r in regions.iter_mut() {
         r.key = None;
-    }
-
-    // 묶음(하위 폴더)마다 페이지를 따로 쓴다. 묶음이 없으면 한 번에.
-    let mut by_group: std::collections::BTreeMap<&Option<String>, Vec<usize>> = Default::default();
-    for &i in &packed {
-        by_group.entry(groups[i]).or_default().push(i);
-    }
-    let mut pages = Vec::new();
-    for ids in by_group.values() {
-        if settings.grid {
-            pages.extend(pack_grid(&mut regions, ids, settings)?);
-            continue;
-        }
-        // 다각형 패킹: 모양대로 묶은 것과 사각형으로 묶은 것 중 페이지가 적고 좁은 쪽을 쓴다
-        let shaped = if polygons && ids.iter().any(|&i| regions[i].mask.is_some()) {
-            polygon::pack_polygons(&mut regions, ids, settings).ok().map(|p| {
-                let spots: Vec<(usize, i32, i32, bool, bool)> = ids.iter().map(|&i| (i, regions[i].x, regions[i].y, regions[i].rotated, regions[i].flip)).collect();
-                (p, spots)
-            })
-        } else {
-            None
-        };
-        let rects = pack_pages(&mut regions, ids, settings)?;
-        let size = |p: &[Page]| (p.len(), p.iter().map(|p| p.w as i64 * p.h as i64).sum::<i64>());
-        match shaped {
-            Some((p, spots)) if size(&p) < size(&rects) => {
-                for (i, x, y, rotated, flip) in spots {
-                    (regions[i].x, regions[i].y, regions[i].rotated, regions[i].flip) = (x, y, rotated, flip);
-                }
-                pages.extend(p);
-            }
-            _ => pages.extend(rects),
-        }
     }
     for (&rep, list) in &aliases {
         let (x, y, rot, flip) = (regions[rep].x, regions[rep].y, regions[rep].rotated, regions[rep].flip);
@@ -1379,58 +1445,22 @@ fn pack_at(sources: &[Source], name: &str, settings: &AtlasSettings, scale: f32,
         }
     }
 
-    let rgbas: Vec<Vec<u8>> = pages.par_iter().map(|p| blit(p.w, p.h, &p.regions, &regions, settings)).collect();
-    let repeat = match (settings.wrap_x != TextureWrap::ClampToEdge, settings.wrap_y != TextureWrap::ClampToEdge) {
-        (true, true) => Some("xy"),
-        (true, false) => Some("x"),
-        (false, true) => Some("y"),
-        _ => None,
-    };
+    let rgbas: Vec<Vec<u8>> = pages.par_iter().map(|(p, s, _)| blit(p.w, p.h, &p.regions, &regions, s)).collect();
     let mut text = String::new();
     let mut out_pages = Vec::with_capacity(pages.len());
-    for (i, (page, rgba)) in pages.iter().zip(rgbas).enumerate() {
+    for (i, ((page, settings, scale), rgba)) in pages.iter().zip(rgbas).enumerate() {
+        let (settings, scale) = (*settings, *scale);
         // Spine: 첫 페이지는 이름 그대로, 다음부터 `이름 + separator + 번호`(2부터)
-        let file_name = if i == 0 { format!("{name}.png") } else { format!("{name}{}{}.png", settings.separator, i + 1) };
-        if settings.legacy_output {
-            // 옛 형식(Spine 의 Legacy output 과 같은 글자): 페이지마다 빈 줄로 시작하고, 머리말 네 줄은 순서·개수가 고정이다
-            // (3.8 런타임은 차례대로만 읽는다). pma · scale 줄은 없다.
-            let comma = if settings.legacy_editor38 { "," } else { ", " };
-            let _ = writeln!(
-                text,
-                "\n{}\nsize: {}{comma}{}\nformat: {}\nfilter: {}{comma}{}\nrepeat: {}",
-                file_name,
-                page.w,
-                page.h,
-                settings.format.as_str(),
-                settings.filter_min.as_str(),
-                settings.filter_mag.as_str(),
-                repeat.unwrap_or("none")
-            );
-        } else {
-            if i > 0 {
-                text.push('\n'); // 페이지 사이에는 빈 줄이 있어야 런타임이 새 페이지로 읽는다
-            }
-            let _ = writeln!(text, "{}\nsize:{},{}", file_name, page.w, page.h);
-            if settings.format != PixelFormat::RGBA8888 {
-                let _ = writeln!(text, "format:{}", settings.format.as_str());
-            }
-            let _ = writeln!(text, "filter:{},{}", settings.filter_min.as_str(), settings.filter_mag.as_str());
-            if let Some(rep) = repeat {
-                let _ = writeln!(text, "repeat:{rep}");
-            }
-            if settings.pma {
-                text.push_str("pma:true\n");
-            }
-            if scale != 1.0 {
-                let _ = writeln!(text, "scale:{scale}"); // Spine 도 배율을 적는다
-            }
-        }
-        // 이름 순(자연 순, 같으면 index 순)으로 쓴다. 안정 정렬(C# OrderBy · 파이썬 sorted 와 같음).
+        let file_name = if i == 0 { format!("{name}.png") } else { format!("{name}{}{}.png", root.separator, i + 1) };
+        write_page_header(&mut text, &file_name, page, settings, scale, i == 0);
+        // Spine 처럼 이름 Ordinal 순(UTF-16, 대소문자 구분: `Line_root` < `bird`, `a10` < `a2`)으로 쓰고,
+        // 같은 이름이면 index 오름차순, index 가 없는 것은 그 뒤에 둔다(Spine 4.2.43 으로 확인).
         // 같은 그림을 함께 쓰는 영역(에일리어스)은 Spine 처럼 그 그림을 실은 영역 바로 뒤에 이름 순으로 붙인다.
         let by_name = |list: &[usize]| -> Vec<usize> {
             let keys: Vec<Vec<u16>> = list.iter().map(|&i| regions[i].out_name.encode_utf16().collect()).collect();
             let mut order: Vec<usize> = (0..list.len()).collect();
-            order.sort_by(|&a, &b| natural::natural_cmp16(&keys[a], &keys[b]).then(regions[list[a]].index.cmp(&regions[list[b]].index)));
+            let index = |i: usize| regions[list[i]].index.map_or((1, 0), |n| (0, n));
+            order.sort_by(|&a, &b| keys[a].cmp(&keys[b]).then(index(a).cmp(&index(b))));
             order.into_iter().map(|o| list[o]).collect()
         };
         let mut ids: Vec<usize> = Vec::with_capacity(page.regions.len());
@@ -1441,50 +1471,127 @@ fn pack_at(sources: &[Source], name: &str, settings: &AtlasSettings, scale: f32,
             }
         }
         for id in ids {
-            let r = &regions[id];
-            let _ = writeln!(text, "{}", r.out_name);
-            if settings.legacy_output {
-                // 영역마다 여섯 줄, 순서 고정. 크기는 돌리기 전의 것이고 offset 은 왼쪽·아래 기준이다
-                let rotate = match (r.rotated, r.flip) {
-                    (false, false) => "false",
-                    (true, false) => "true",
-                    (false, true) => "180",
-                    (true, true) => "270",
-                };
-                let _ = writeln!(
-                    text,
-                    "  rotate: {}\n  xy: {}, {}\n  size: {}, {}\n  orig: {}, {}\n  offset: {}, {}\n  index: {}",
-                    rotate,
-                    r.x,
-                    r.y,
-                    r.w,
-                    r.h,
-                    r.orig_w,
-                    r.orig_h,
-                    r.left,
-                    r.bottom_off,
-                    r.index.unwrap_or(-1)
-                );
-                continue;
-            }
-            if let Some(index) = r.index {
-                let _ = writeln!(text, "index:{index}");
-            }
-            let _ = writeln!(text, "bounds:{},{},{},{}", r.x, r.y, r.w, r.h);
-            if r.stripped() {
-                let _ = writeln!(text, "offsets:{},{},{},{}", r.left, r.bottom_off, r.orig_w, r.orig_h);
-            }
-            match (r.rotated, r.flip) {
-                (true, false) => text.push_str("rotate:90\n"),
-                (false, true) => text.push_str("rotate:180\n"),
-                (true, true) => text.push_str("rotate:270\n"),
-                _ => {}
-            }
+            write_region(&mut text, &regions[id], settings.legacy_output);
         }
         out_pages.push(AtlasPage { name: file_name, width: page.w as u32, height: page.h as u32, rgba });
     }
 
     Ok(PackResult { output: AtlasOutput { atlas_text: text, pages: out_pages }, missing, ignored })
+}
+
+/// 묶음 하나(같은 설정)의 영역을 페이지로 나눠 놓는다.
+fn pack_group(regions: &mut [Region], ids: &[usize], settings: &AtlasSettings) -> SpineResult<Vec<Page>> {
+    if settings.grid {
+        return pack_grid(regions, ids, settings);
+    }
+    // 다각형 패킹: 모양대로 묶은 것과 사각형으로 묶은 것 중 페이지가 적고 좁은 쪽을 쓴다
+    let shaped = if settings.polygons() && ids.iter().any(|&i| regions[i].mask.is_some()) {
+        polygon::pack_polygons(regions, ids, settings).ok().map(|p| {
+            let spots: Vec<(usize, i32, i32, bool, bool)> = ids.iter().map(|&i| (i, regions[i].x, regions[i].y, regions[i].rotated, regions[i].flip)).collect();
+            (p, spots)
+        })
+    } else {
+        None
+    };
+    let rects = pack_pages(regions, ids, settings)?;
+    let size = |p: &[Page]| (p.len(), p.iter().map(|p| p.w as i64 * p.h as i64).sum::<i64>());
+    match shaped {
+        Some((p, spots)) if size(&p) < size(&rects) => {
+            for (i, x, y, rotated, flip) in spots {
+                (regions[i].x, regions[i].y, regions[i].rotated, regions[i].flip) = (x, y, rotated, flip);
+            }
+            Ok(p)
+        }
+        _ => Ok(rects),
+    }
+}
+
+/// 페이지 머리말. 페이지마다 그 묶음의 설정을 따른다(Spine 도 폴더 설정이 다르면 머리말이 다르다).
+fn write_page_header(text: &mut String, file_name: &str, page: &Page, settings: &AtlasSettings, scale: f32, first: bool) {
+    let repeat = match (settings.wrap_x != TextureWrap::ClampToEdge, settings.wrap_y != TextureWrap::ClampToEdge) {
+        (true, true) => Some("xy"),
+        (true, false) => Some("x"),
+        (false, true) => Some("y"),
+        _ => None,
+    };
+    if settings.legacy_output {
+        // 옛 형식(Spine 의 Legacy output 과 같은 글자): 페이지마다 빈 줄로 시작하고, 머리말 네 줄은 순서·개수가 고정이다
+        // (3.8 런타임은 차례대로만 읽는다). pma · scale 줄은 없다.
+        let comma = if settings.legacy_editor38 { "," } else { ", " };
+        let _ = writeln!(
+            text,
+            "\n{}\nsize: {}{comma}{}\nformat: {}\nfilter: {}{comma}{}\nrepeat: {}",
+            file_name,
+            page.w,
+            page.h,
+            settings.format.as_str(),
+            settings.filter_min.as_str(),
+            settings.filter_mag.as_str(),
+            repeat.unwrap_or("none")
+        );
+        return;
+    }
+    if !first {
+        text.push('\n'); // 페이지 사이에는 빈 줄이 있어야 런타임이 새 페이지로 읽는다
+    }
+    let _ = writeln!(text, "{}\nsize:{},{}", file_name, page.w, page.h);
+    if settings.format != PixelFormat::RGBA8888 {
+        let _ = writeln!(text, "format:{}", settings.format.as_str());
+    }
+    // Spine 은 기본값(Nearest, Nearest)이면 filter 줄을 쓰지 않는다
+    if settings.filter_min != TextureFilter::Nearest || settings.filter_mag != TextureFilter::Nearest {
+        let _ = writeln!(text, "filter:{},{}", settings.filter_min.as_str(), settings.filter_mag.as_str());
+    }
+    if let Some(rep) = repeat {
+        let _ = writeln!(text, "repeat:{rep}");
+    }
+    if settings.pma {
+        text.push_str("pma:true\n");
+    }
+    if scale != 1.0 {
+        let _ = writeln!(text, "scale:{scale}"); // Spine 도 배율을 적는다
+    }
+}
+
+fn write_region(text: &mut String, r: &Region, legacy: bool) {
+    let _ = writeln!(text, "{}", r.out_name);
+    if legacy {
+        // 영역마다 여섯 줄, 순서 고정. 크기는 돌리기 전의 것이고 offset 은 왼쪽·아래 기준이다
+        let rotate = match (r.rotated, r.flip) {
+            (false, false) => "false",
+            (true, false) => "true",
+            (false, true) => "180",
+            (true, true) => "270",
+        };
+        let _ = writeln!(
+            text,
+            "  rotate: {}\n  xy: {}, {}\n  size: {}, {}\n  orig: {}, {}\n  offset: {}, {}\n  index: {}",
+            rotate,
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            r.orig_w,
+            r.orig_h,
+            r.left,
+            r.bottom_off,
+            r.index.unwrap_or(-1)
+        );
+        return;
+    }
+    if let Some(index) = r.index {
+        let _ = writeln!(text, "index:{index}");
+    }
+    let _ = writeln!(text, "bounds:{},{},{},{}", r.x, r.y, r.w, r.h);
+    if r.stripped() {
+        let _ = writeln!(text, "offsets:{},{},{},{}", r.left, r.bottom_off, r.orig_w, r.orig_h);
+    }
+    match (r.rotated, r.flip) {
+        (true, false) => text.push_str("rotate:90\n"),
+        (false, true) => text.push_str("rotate:180\n"),
+        (true, true) => text.push_str("rotate:270\n"),
+        _ => {}
+    }
 }
 
 #[cfg(test)]

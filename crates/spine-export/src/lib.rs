@@ -330,7 +330,7 @@ pub fn export_skeleton(
 fn sources_for(model: &SkeletonModel, images: &Path, opts: &ExportOptions) -> SpineResult<Vec<Source>> {
     match opts.pack_source {
         PackSource::Attachments => spine_atlas::attachment_sources(model, images),
-        PackSource::ImageFolders => spine_atlas::folder_sources(model, images, opts.pack.combine_subdirectories),
+        PackSource::ImageFolders => spine_atlas::folder_sources(model, images, &opts.pack),
     }
 }
 
@@ -351,6 +351,20 @@ fn write_atlas(
     // Spine 도 3.8 로 내보내면 Legacy output 을 꺼 두어도 옛 형식으로 쓴다.
     let legacy = AtlasSettings { legacy_output: true, legacy_editor38: editor_38(project_format, runtime), ..pack.clone() };
     let pack = if runtime.starts_with("3.") { &legacy } else { pack };
+    // 폴더 안 pack.json 으로 읽은 설정도 3.8 이면 옛 형식으로
+    let forced: Vec<Source>;
+    let sources = if runtime.starts_with("3.") && sources.iter().any(|s| s.settings.is_some()) {
+        forced = sources
+            .iter()
+            .map(|s| Source {
+                settings: s.settings.as_ref().map(|f| std::sync::Arc::new(AtlasSettings { legacy_output: true, legacy_editor38: legacy.legacy_editor38, ..(**f).clone() })),
+                ..s.clone()
+            })
+            .collect();
+        &forced[..]
+    } else {
+        sources
+    };
     if pack.bleed && pack.pma {
         report.notes.push("PMA 가 켜져 있어 블리드는 적용하지 않았습니다.".into());
     }
