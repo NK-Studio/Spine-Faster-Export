@@ -1,9 +1,13 @@
+# v* 태그를 푸시하면 macOS(DMG)·Windows(설치 프로그램) 배포본을 빌드해 GitHub 릴리스에 올린다.
 name: build
 
 on:
   workflow_dispatch:
   push:
     tags: ["v*"]
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -17,22 +21,57 @@ jobs:
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.platform }}
+    env:
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
         with: { version: 10 }
-      - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: pnpm }
+      - uses: actions/setup-node@v7
+        with: { node-version: latest, cache: pnpm }
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: "${{ matrix.target }}" }
       - uses: Swatinem/rust-cache@v2
       - run: pnpm install --frozen-lockfile
       - run: cargo test --workspace --exclude spine-faster-export --release
-      - uses: tauri-apps/tauri-action@v0
+
+      # 맥 서명. Developer ID 인증서(.p12, base64) 시크릿이 있으면 그것으로 서명하고,
+      # App Store Connect API 키까지 있으면 공증한다. 없으면 ad-hoc 서명만 한다
+      # (Apple Silicon 은 서명 없는 앱을 실행하지 않는다).
+      - name: macOS 서명 설정
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          if [ -z "$MACOS_CERT_P12" ]; then
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            echo "인증서 시크릿이 없어 ad-hoc 서명합니다"
+            exit 0
+          fi
+          {
+            echo "APPLE_CERTIFICATE=$MACOS_CERT_P12"
+            echo "APPLE_CERTIFICATE_PASSWORD=$MACOS_CERT_PASSWORD"
+          } >> "$GITHUB_ENV"
+          if [ -n "$APPLE_API_KEY_P8" ]; then
+            echo "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/notary.p8"
+            {
+              echo "APPLE_API_KEY=$APPLE_API_KEY_ID"
+              echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
+              echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/notary.p8"
+            } >> "$GITHUB_ENV"
+          fi
+
+      - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          args: --target ${{ matrix.target }}
+          # 맥은 .app 과 설치용 .dmg, 윈도는 NSIS·MSI 설치 프로그램을 만든다.
+          args: --target ${{ matrix.target }} --bundles ${{ runner.os == 'macOS' && 'app,dmg' || 'nsis,msi' }}
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: "Quick Spine ${{ github.ref_name }}"
-          releaseDraft: true
+          releaseDraft: false
+          prerelease: false
