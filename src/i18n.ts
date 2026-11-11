@@ -264,6 +264,7 @@ const en: Record<string, string> = {
   "빠르게": "Fast",
   "디버그": "Debug",
   "레거시 출력": "Legacy output",
+  "보기 좋게 쓰기": "Pretty print",
   "로드": "Load",
   "확인": "OK",
   "이 알파 이하는 투명으로 보고 잘라냅니다": "Alpha at or below this is treated as transparent and trimmed",
@@ -313,6 +314,8 @@ const en: Record<string, string> = {
   "영역 테두리를 분홍 선으로 그립니다": "Draws region outlines in pink",
   "3.8 이하 런타임이 읽는 옛 atlas 형식으로 씁니다. 3.8 로 내보내면 꺼져 있어도 옛 형식으로 씁니다":
     "Writes the old atlas format read by 3.8 and earlier runtimes. Exporting for 3.8 always uses the old format, even when this is off",
+  "atlas 를 탭으로 들여 쓰고 «size: 1024, 512» 처럼 띄어 씁니다(Spine 과 같은 글자). 런타임은 둘 다 읽습니다. 레거시 출력에는 쓰지 않습니다":
+    "Indents the atlas with tabs and adds spaces, as in «size: 1024, 512» (same text as Spine). Runtimes read both. Not used for Legacy output",
   "16 이상이어야 합니다.": "Must be 16 or more.",
   "최대 폭보다 클 수 없습니다.": "Can't be larger than Max width.",
   "최대 높이보다 클 수 없습니다.": "Can't be larger than Max height.",

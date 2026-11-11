@@ -650,6 +650,35 @@ fn parse_like_38(text: &str) -> Vec<(String, i32, i32, Vec<(String, String, i32,
 }
 
 #[test]
+fn pretty_print_like_spine() {
+    // Spine 4.2 의 Pretty print 글자: 머리말·영역 줄을 탭으로 들이고 `: ` · `, ` 로 띄운다. 레거시 출력에는 쓰지 않는다.
+    let dir = temp_dir("pretty");
+    let m = many(&dir);
+    let s = AtlasSettings {
+        use_indexes: true,
+        filter_mag: TextureFilter::MipMap,
+        wrap_x: TextureWrap::Repeat,
+        format: PixelFormat::RGBA4444,
+        pretty_print: true,
+        ..AtlasSettings::default()
+    }
+    .with_max_size(128);
+    let plain = pack(&m, &dir, "g", &AtlasSettings { pretty_print: false, ..s.clone() }).unwrap().atlas_text;
+    let t = pack(&m, &dir, "g", &s).unwrap().atlas_text;
+    assert!(t.starts_with("g.png\n\tsize: "), "{t}");
+    assert!(t.contains("\n\tformat: RGBA4444\n\tfilter: Linear, MipMap\n\trepeat: x\n\tpma: true\n"), "{t}");
+    assert!(t.contains("\nimg\n\tindex: 0\n\tbounds: "), "{t}");
+    // 글자만 다르고 값은 같다
+    let squash = |v: &str| v.replace(['\t', ' '], "");
+    assert_eq!(squash(&t), squash(&plain));
+    let legacy = AtlasSettings { legacy_output: true, ..s.clone() };
+    let lt = pack(&m, &dir, "g", &legacy).unwrap().atlas_text;
+    assert_eq!(lt, pack(&m, &dir, "g", &AtlasSettings { pretty_print: false, ..legacy }).unwrap().atlas_text);
+    assert!(!lt.contains('\t'));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn legacy_output_reads_like_38() {
     let dir = temp_dir("legacy");
     let mut entries = Vec::new();

@@ -123,6 +123,7 @@ const DEFAULT_PACK: PackSettings = {
   debug: false,
   separator: "_",
   legacyOutput: false,
+  prettyPrint: false,
 };
 
 const DEFAULTS: ExportOptions = {

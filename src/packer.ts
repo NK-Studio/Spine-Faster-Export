@@ -60,6 +60,8 @@ export interface PackSettings {
   separator: string;
   /** 3.8 이하 런타임이 읽는 옛 atlas 형식으로 쓴다(Spine 의 Legacy output). */
   legacyOutput: boolean;
+  /** atlas 를 탭 들여쓰기와 띄어쓰기로 읽기 좋게 쓴다(Spine 의 Pretty print). */
+  prettyPrint: boolean;
 }
 
 const FILTERS: Filter[] = ["Nearest", "Linear", "MipMap", "MipMapNearestNearest", "MipMapLinearNearest", "MipMapNearestLinear", "MipMapLinearLinear"];
@@ -264,6 +266,7 @@ export function openPackerDialog(
             ${chk("useIndexes", t("인덱스 사용"), t("이름 끝의 _숫자를 index 로 씁니다"))}
             ${chk("fast", t("빠르게"), t("덜 촘촘하지만 빨리 묶습니다"))}
             ${chk("debug", t("디버그"), t("영역 테두리를 분홍 선으로 그립니다"))}
+            ${chk("prettyPrint", t("보기 좋게 쓰기"), t("atlas 를 탭으로 들여 쓰고 «size: 1024, 512» 처럼 띄어 씁니다(Spine 과 같은 글자). 런타임은 둘 다 읽습니다. 레거시 출력에는 쓰지 않습니다"))}
             ${chk("legacyOutput", t("레거시 출력"), t("3.8 이하 런타임이 읽는 옛 atlas 형식으로 씁니다. 3.8 로 내보내면 꺼져 있어도 옛 형식으로 씁니다"))}
           </div>
         </section>`;

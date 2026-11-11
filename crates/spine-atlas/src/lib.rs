@@ -174,6 +174,9 @@ pub struct AtlasSettings {
     pub separator: String,
     /// Legacy output: 3.8 이하 런타임이 읽는 옛 atlas 형식(`rotate` · `xy` · `size` · `orig` · `offset` · `index`)으로 쓴다.
     pub legacy_output: bool,
+    /// Pretty print: atlas 의 머리말·영역 줄을 탭으로 들이고 `size: 1024, 512` 처럼 띄어 쓴다(Spine 과 같은 글자).
+    /// 런타임은 둘 다 읽는다. 옛 형식(`legacy_output`)에는 쓰지 않는다(Spine 도 그렇다).
+    pub pretty_print: bool,
     /// 옛 형식의 머리말을 Spine 3.8 편집기가 쓰던 글자로 쓴다(`size: 1534,529` · `filter: Linear,Linear`: 쉼표 뒤에 빈칸이 없다).
     /// Spine 4.x 의 Legacy output 은 `size: 1534, 529` 처럼 쓴다. 런타임은 둘 다 읽는다. pack.json 에는 없는 값이다.
     #[serde(skip)]
@@ -224,6 +227,7 @@ impl Default for AtlasSettings {
             debug: false,
             separator: "_".into(),
             legacy_output: false,
+            pretty_print: false,
             legacy_editor38: false,
         }
     }
@@ -1535,7 +1539,7 @@ fn pack_at(sources: &[Source], name: &str, root: &AtlasSettings, suffix: &str) -
             }
         }
         for id in ids {
-            write_region(&mut text, &regions[id], settings.legacy_output);
+            write_region(&mut text, &regions[id], settings);
         }
         out_pages.push(AtlasPage { name: file_name, width: page.w as u32, height: page.h as u32, rgba });
     }
@@ -1598,28 +1602,38 @@ fn write_page_header(text: &mut String, file_name: &str, page: &Page, settings: 
     if !first {
         text.push('\n'); // 페이지 사이에는 빈 줄이 있어야 런타임이 새 페이지로 읽는다
     }
-    let _ = writeln!(text, "{}\nsize:{},{}", file_name, page.w, page.h);
+    let (t, c, k) = seps(settings);
+    let _ = writeln!(text, "{file_name}\n{t}size{k}{}{c}{}", page.w, page.h);
     if settings.format != PixelFormat::RGBA8888 {
-        let _ = writeln!(text, "format:{}", settings.format.as_str());
+        let _ = writeln!(text, "{t}format{k}{}", settings.format.as_str());
     }
     // Spine 은 기본값(Nearest, Nearest)이면 filter 줄을 쓰지 않는다
     if settings.filter_min != TextureFilter::Nearest || settings.filter_mag != TextureFilter::Nearest {
-        let _ = writeln!(text, "filter:{},{}", settings.filter_min.as_str(), settings.filter_mag.as_str());
+        let _ = writeln!(text, "{t}filter{k}{}{c}{}", settings.filter_min.as_str(), settings.filter_mag.as_str());
     }
     if let Some(rep) = repeat {
-        let _ = writeln!(text, "repeat:{rep}");
+        let _ = writeln!(text, "{t}repeat{k}{rep}");
     }
     if settings.pma {
-        text.push_str("pma:true\n");
+        let _ = writeln!(text, "{t}pma{k}true");
     }
     if scale != 1.0 {
-        let _ = writeln!(text, "scale:{scale}"); // Spine 도 배율을 적는다
+        let _ = writeln!(text, "{t}scale{k}{scale}"); // Spine 도 배율을 적는다
     }
 }
 
-fn write_region(text: &mut String, r: &Region, legacy: bool) {
+/// 줄 앞 들여쓰기, 값 사이 쉼표, 이름 뒤 쌍점. Pretty print 면 `\t` · `, ` · `: `.
+fn seps(settings: &AtlasSettings) -> (&'static str, &'static str, &'static str) {
+    if settings.pretty_print {
+        ("\t", ", ", ": ")
+    } else {
+        ("", ",", ":")
+    }
+}
+
+fn write_region(text: &mut String, r: &Region, settings: &AtlasSettings) {
     let _ = writeln!(text, "{}", r.out_name);
-    if legacy {
+    if settings.legacy_output {
         // 영역마다 여섯 줄, 순서 고정. 크기는 돌리기 전의 것이고 offset 은 왼쪽·아래 기준이다
         let rotate = match (r.rotated, r.flip) {
             (false, false) => "false",
@@ -1643,18 +1657,22 @@ fn write_region(text: &mut String, r: &Region, legacy: bool) {
         );
         return;
     }
+    let (t, c, k) = seps(settings);
     if let Some(index) = r.index {
-        let _ = writeln!(text, "index:{index}");
+        let _ = writeln!(text, "{t}index{k}{index}");
     }
-    let _ = writeln!(text, "bounds:{},{},{},{}", r.x, r.y, r.w, r.h);
+    let _ = writeln!(text, "{t}bounds{k}{}{c}{}{c}{}{c}{}", r.x, r.y, r.w, r.h);
     if r.stripped() {
-        let _ = writeln!(text, "offsets:{},{},{},{}", r.left, r.bottom_off, r.orig_w, r.orig_h);
+        let _ = writeln!(text, "{t}offsets{k}{}{c}{}{c}{}{c}{}", r.left, r.bottom_off, r.orig_w, r.orig_h);
     }
-    match (r.rotated, r.flip) {
-        (true, false) => text.push_str("rotate:90\n"),
-        (false, true) => text.push_str("rotate:180\n"),
-        (true, true) => text.push_str("rotate:270\n"),
-        _ => {}
+    let rotate = match (r.rotated, r.flip) {
+        (true, false) => Some(90),
+        (false, true) => Some(180),
+        (true, true) => Some(270),
+        _ => None,
+    };
+    if let Some(deg) = rotate {
+        let _ = writeln!(text, "{t}rotate{k}{deg}");
     }
 }
 
