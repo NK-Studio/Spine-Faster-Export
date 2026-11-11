@@ -542,6 +542,8 @@ select.field option { background: var(--git-menu-bg); color: var(--git-text); }
 .pk-kv.two:has(> .row) { grid-template-columns: max-content minmax(0, 1fr); }
 .pk-kv .row { gap: 8px; }
 .pk-kv .ext { width: 120px; height: 24px; flex: none; }
+.pk-kv .pk-q { display: flex; }
+.pk-kv .quality { width: 64px; height: 24px; flex: none; }
 .pk-scale { display: grid; grid-template-columns: max-content repeat(5, minmax(0, 1fr)); gap: 6px; align-items: center; }
 .pk-scale .field { height: 24px; padding: 0 6px; width: 100%; text-align: center; }
 .pk-scale .select > .select-btn { padding: 0 20px 0 6px; text-align: left; }

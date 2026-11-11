@@ -106,6 +106,7 @@ const DEFAULT_PACK: PackSettings = {
   wrapY: "ClampToEdge",
   format: "RGBA8888",
   outputFormat: "png",
+  jpegQuality: 0.9,
   grid: false,
   packing: "rectangles",
   premultiplyAlpha: true,
@@ -767,7 +768,7 @@ function renderSettings() {
         ${lbl(t("텍스처 아틀라스"))}
         <div class="stack">
           <div class="row">
-            ${check("opt-atlas", t("팩"), a, true, t("내보낼 때 텍스처 아틀라스(atlas + PNG)도 함께 만듭니다"))}
+            ${check("opt-atlas", t("팩"), a, true, t("내보낼 때 텍스처 아틀라스(atlas + 페이지 이미지)도 함께 만듭니다"))}
             ${
               a
                 ? `${select(

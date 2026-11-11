@@ -5,9 +5,10 @@
 //! PMA/에일리어스/최대 크기 옵션은 파이썬 PoC 와 같다. 블리드는 Spine 처럼 페이지 전체에 한다(영역 사이 여백까지).
 //! 페이지 안 배치는 Spine 과 같지 않을 수 있다(런타임은 atlas 좌표를 쓰므로 결과에는 영향이 없다).
 //!
-//! 공개 API(계약): [`AtlasSettings`], [`pack`], [`pack_scales`], [`encode_png`]. 빠진 이미지 목록이 필요하면 [`pack_detailed`].
+//! 공개 API(계약): [`AtlasSettings`], [`pack`], [`pack_scales`], [`encode_page`](PNG · JPG; [`encode_png`] · [`encode_jpeg`]). 빠진 이미지 목록이 필요하면 [`pack_detailed`].
 
 mod natural;
+mod jpeg_codec;
 mod png_codec;
 mod polygon;
 mod resize;
@@ -131,8 +132,12 @@ pub struct AtlasSettings {
     pub wrap_y: TextureWrap,
     pub format: PixelFormat,
     // Output
-    /// "png" 만 지원한다.
+    /// 페이지 파일 형식: "png" 또는 "jpg".
+    /// JPG 는 알파가 없어 Spine 처럼 검정 위에 얹은(미리 곱한) RGB 를 쓴다. PMA·블리드 설정은 픽셀에 영향이 없고,
+    /// atlas 의 `format:` · `pma:` 줄은 설정 그대로 쓴다.
     pub output_format: String,
+    /// JPG 품질(0~1, Spine `jpegQuality`). Java ImageIO 와 같은 뜻(0.5 아래는 표 배율 0.5/값, 위는 2 - 2×값).
+    pub jpeg_quality: f32,
     /// 격자 배치(같은 크기 칸에 차례로).
     pub grid: bool,
     /// Spine 4.x 의 Packing: "rectangles" · "grid" · "polygons". 읽을 때 "grid" 면 `grid` 를 켠다([`normalize`](Self::normalize)).
@@ -201,6 +206,7 @@ impl Default for AtlasSettings {
             wrap_y: TextureWrap::ClampToEdge,
             format: PixelFormat::RGBA8888,
             output_format: "png".into(),
+            jpeg_quality: 0.9,
             grid: false,
             packing: "rectangles".into(),
             pma: true,
@@ -278,9 +284,22 @@ impl AtlasSettings {
         v
     }
 
+    /// 출력 형식이 JPG 인가("jpg" · "jpeg", 대소문자 무시).
+    pub fn jpeg(&self) -> bool {
+        self.output_format.eq_ignore_ascii_case("jpg") || self.output_format.eq_ignore_ascii_case("jpeg")
+    }
+
+    /// 페이지 파일 확장자(점 없이): "png" 또는 "jpg".
+    pub fn page_extension(&self) -> &'static str {
+        if self.jpeg() { "jpg" } else { "png" }
+    }
+
     fn check(&self) -> SpineResult<()> {
-        if !self.output_format.is_empty() && !self.output_format.eq_ignore_ascii_case("png") {
-            return Err(SpineError::Unsupported(format!("출력 형식 {} 은 지원하지 않습니다(PNG 만).", self.output_format)));
+        if !self.output_format.is_empty() && !self.output_format.eq_ignore_ascii_case("png") && !self.jpeg() {
+            return Err(SpineError::Unsupported(format!("출력 형식 {} 은 지원하지 않습니다(PNG · JPG 만).", self.output_format)));
+        }
+        if self.jpeg() && !(self.jpeg_quality.is_finite() && (0.0..=1.0).contains(&self.jpeg_quality)) {
+            return Err(SpineError::Usage(format!("JPEG 품질은 0~1 이어야 합니다({}).", self.jpeg_quality)));
         }
         if self.max_width < 16 || self.max_height < 16 {
             return Err(SpineError::Usage("최대 폭·높이는 16 이상이어야 합니다.".into()));
@@ -1039,8 +1058,9 @@ fn blit(page_w: i32, page_h: i32, ids: &[usize], regions: &[Region], s: &AtlasSe
             duplicate_edges(&mut out, pw, ph, rect, ax, ay, Some(&claims));
         }
     }
-    // 블리드는 PMA 를 끌 때만 의미가 있다(Spine 도 PMA 켜짐에서는 결과가 같다)
-    if s.bleed && !s.pma {
+    // 블리드는 PMA 를 끌 때만 의미가 있다(Spine 도 PMA 켜짐에서는 결과가 같다).
+    // JPG 는 아래에서 검정 위에 얹으므로 투명 픽셀의 RGB 가 남지 않는다(Spine 도 블리드와 상관없이 같은 파일).
+    if s.bleed && !s.pma && !s.jpeg() {
         out = bleed_rgb(pw, ph, out, s.bleed_iterations as usize);
     }
     if s.debug {
@@ -1052,7 +1072,24 @@ fn blit(page_w: i32, page_h: i32, ids: &[usize], regions: &[Region], s: &AtlasSe
         }
         draw_rect(&mut out, pw, ph, (0, 0, pw, ph));
     }
+    if s.jpeg() {
+        flatten_on_black(&mut out, s.pma);
+    }
     out
+}
+
+/// JPG: 알파가 없으므로 검정 위에 얹는다(RGB 에 알파를 곱하고 알파는 255). Spine 은 PMA 설정과 상관없이 이렇게 쓴다.
+/// 이미 미리 곱했으면(PMA) 알파만 채운다.
+fn flatten_on_black(px: &mut [u8], premultiplied: bool) {
+    for p in px.chunks_exact_mut(4) {
+        if !premultiplied {
+            let a = p[3] as u32;
+            p[0] = (p[0] as u32 * a / 255) as u8;
+            p[1] = (p[1] as u32 * a / 255) as u8;
+            p[2] = (p[2] as u32 * a / 255) as u8;
+        }
+        p[3] = 255;
+    }
 }
 
 /// 사각형을 가로 ax · 세로 ay 만큼 넓힌 테두리(사각형 밖, 페이지 안)의 픽셀마다:
@@ -1141,6 +1178,29 @@ pub fn pack(model: &SkeletonModel, images_dir: &Path, name: &str, settings: &Atl
 /// 페이지를 PNG 바이트로.
 pub fn encode_png(page: &AtlasPage) -> Vec<u8> {
     png_codec::encode(page.width, page.height, &page.rgba)
+}
+
+/// 페이지를 JPEG 바이트로(quality 0~1). 알파는 버리므로 RGB 가 이미 검정 위에 얹혀 있어야 한다
+/// (출력 형식이 JPG 인 [`pack`] 결과는 그렇다).
+/// Spine(Java ImageIO)과 같게: JFIF 1.02, 기준선, 표준 허프만 표, 4:2:0(크로마 2×2 평균), 품질로 배율을 준 Annex K 양자화 표.
+pub fn encode_jpeg(page: &AtlasPage, quality: f32) -> SpineResult<Vec<u8>> {
+    jpeg_codec::encode(page.width, page.height, &page.rgba, quality)
+}
+
+/// 페이지를 PNG · JPG 로 인코딩한다. 형식은 페이지 파일 이름의 확장자를 따른다(폴더 `pack.json` 마다 출력 형식이
+/// 다를 수 있다). 확장자가 둘 다 아니면 settings 의 출력 형식. JPG 품질은 settings 의 값이다.
+pub fn encode_page(page: &AtlasPage, settings: &AtlasSettings) -> SpineResult<Vec<u8>> {
+    let ext = page.name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    let jpeg = match ext.as_str() {
+        "jpg" | "jpeg" => true,
+        "png" => false,
+        _ => settings.jpeg(),
+    };
+    if jpeg {
+        encode_jpeg(page, settings.jpeg_quality)
+    } else {
+        Ok(encode_png(page))
+    }
 }
 
 /// [`pack`] 과 같고, 빠지거나 뺀 영역 이름도 돌려준다.
@@ -1451,7 +1511,9 @@ fn pack_at(sources: &[Source], name: &str, root: &AtlasSettings, suffix: &str) -
     for (i, ((page, settings, scale), rgba)) in pages.iter().zip(rgbas).enumerate() {
         let (settings, scale) = (*settings, *scale);
         // Spine: 첫 페이지는 이름 그대로, 다음부터 `이름 + separator + 번호`(2부터)
-        let file_name = if i == 0 { format!("{name}.png") } else { format!("{name}{}{}.png", root.separator, i + 1) };
+        // 확장자는 그 페이지(폴더) 설정의 출력 형식을 따른다(PNG · JPG)
+        let ext = settings.page_extension();
+        let file_name = if i == 0 { format!("{name}.{ext}") } else { format!("{name}{}{}.{ext}", root.separator, i + 1) };
         write_page_header(&mut text, &file_name, page, settings, scale, i == 0);
         // Spine 처럼 이름 Ordinal 순(UTF-16, 대소문자 구분: `Line_root` < `bird`, `a10` < `a2`)으로 쓰고,
         // 같은 이름이면 index 오름차순, index 가 없는 것은 그 뒤에 둔다(Spine 4.2.43 으로 확인).

@@ -36,7 +36,10 @@ export interface PackSettings {
   wrapX: Wrap;
   wrapY: Wrap;
   format: PixelFormat;
+  /** 페이지 파일 형식: "png" · "jpg". */
   outputFormat: string;
+  /** JPG 품질(0~1, Spine `jpegQuality`). */
+  jpegQuality: number;
   grid: boolean;
   /** Spine 4.x 의 Packing 이름(rectangles · grid · polygons). 그리드면 `grid` 도 함께 켠다. */
   packing: string;
@@ -81,6 +84,7 @@ const packingOf = (p: PackSettings) => (p.grid ? "grid" : p.packing === "polygon
 /** 메인 창에 보일 한 줄 요약. */
 export function packSummary(p: PackSettings, unity = false): string {
   const parts = [`${p.maxWidth}×${p.maxHeight}`, t("여백 {x},{y}", { x: p.paddingX, y: p.paddingY })];
+  if (p.outputFormat === "jpg") parts.push(`JPG ${Math.round(p.jpegQuality * 100)}%`);
   if (p.premultiplyAlpha) parts.push("PMA");
   else if (p.bleed) parts.push(t("블리드"));
   if (p.rotation) parts.push(t("회전"));
@@ -139,6 +143,8 @@ export function openPackerDialog(
 ): Promise<PackerResult | null> {
   return new Promise((resolve) => {
     let s: PackSettings = structuredClone(current);
+    s.outputFormat = s.outputFormat?.toLowerCase() === "jpg" || s.outputFormat?.toLowerCase() === "jpeg" ? "jpg" : "png";
+    s.jpegQuality ??= defaults.jpegQuality;
     if (s.premultiplyAlpha) s.bleed = false; // 둘 다 켜져 있으면 블리드는 쓰이지 않는다
     let unity = currentUnity;
     // Unity 를 끄면 돌아갈 확장자
@@ -170,6 +176,7 @@ export function openPackerDialog(
 
     function render() {
       const scales = [0, 1, 2, 3, 4].map((i) => s.scale[i]);
+      const jpg = s.outputFormat === "jpg";
       body.innerHTML = `
         <section class="pk-sec">
           <div class="pk-title">${t("영역")}</div>
@@ -209,7 +216,7 @@ export function openPackerDialog(
             ${sel("filterMag", t("필터 최대화"), FILTERS, t("확대 필터(atlas filter)"))}
             ${sel("wrapX", t("랩 X"), WRAPS, t("가로 랩(atlas repeat)"))}
             ${sel("wrapY", t("랩 Y"), WRAPS, t("세로 랩(atlas repeat)"))}
-            ${sel("format", t("형식"), FORMATS, t("런타임이 텍스처를 올릴 픽셀 형식(atlas format). PNG 는 RGBA 로 저장합니다"))}
+            ${sel("format", t("형식"), FORMATS, t("런타임이 텍스처를 올릴 픽셀 형식(atlas format). 파일은 PNG 면 RGBA, JPG 면 RGB 로 저장합니다"))}
           </div>
         </section>
 
@@ -217,9 +224,15 @@ export function openPackerDialog(
           <div class="pk-title">${t("출력")}</div>
           <div class="pk-kv two">
             <span class="lbl">${t("형식")}:</span>
-            ${selectHtml("", [["png", "PNG"], ["jpg", t("JPG (지원 안 함)"), true]], "png", true, t("이 앱은 PNG 만 만듭니다"))}
+            ${selectHtml('data-k="outputFormat"', [["png", "PNG"], ["jpg", "JPG"]], jpg ? "jpg" : "png", true, t("페이지 파일 형식. JPG 는 알파가 없어 투명한 곳을 검정으로 채우고, 알파 프리멀티플라이·블리드와 상관없이 색에 알파를 곱해 씁니다(Spine 과 같음)"), "png")}
             <span class="lbl">${t("패킹")}:</span>
             ${selectHtml('data-k="packing"', [["grid", t("그리드")], ["rectangles", t("직사각형")], ["polygons", t("다각형")]], packingOf(s), true, t("직사각형: 촘촘히 · 그리드: 같은 크기 칸에 차례로 · 다각형: 메시만 쓰는 이미지를 메시 모양대로 더 촘촘히(느림)"), packingOf(defaults))}
+            ${
+              jpg
+                ? `<span class="lbl" title="${t("JPG 품질(0~1). 높을수록 선명하고 파일이 큽니다")}">${t("JPEG 품질")}:</span>
+            <div class="pk-q"><input type="text" inputmode="decimal" class="field mono quality" data-jpeg-quality spellcheck="false" value="${s.jpegQuality}" title="${t("JPG 품질(0~1). 높을수록 선명하고 파일이 큽니다")}" /></div>`
+                : ""
+            }
           </div>
           <div class="pk-checks center">
             ${chk("premultiplyAlpha", t("알파 프리멀티플라이"), t("미리 곱한 알파로 저장합니다(atlas pma)"))}
@@ -303,8 +316,16 @@ export function openPackerDialog(
           (el.onchange = () => {
             (s as any)[el.dataset.k!] = el.value;
             if (el.dataset.k === "packing") s.grid = el.value === "grid";
+            if (el.dataset.k === "outputFormat") render(); // JPEG 품질 칸을 보이거나 숨긴다
           }),
       );
+      const quality = body.querySelector<HTMLInputElement>("[data-jpeg-quality]");
+      if (quality)
+        quality.onchange = () => {
+          const v = Number(quality.value.replace(",", "."));
+          if (quality.value.trim() !== "" && Number.isFinite(v)) s.jpegQuality = Math.round(Math.min(1, Math.max(0, v)) * 100) / 100;
+          quality.value = String(s.jpegQuality);
+        };
       const ext = body.querySelector<HTMLInputElement>('input[data-k="atlasExtension"]')!;
       ext.onchange = () => {
         let v = ext.value.trim() || ".atlas";
@@ -429,6 +450,7 @@ export function openPackerDialog(
       try {
         s = await invoke<PackSettings>("load_pack_settings", { path });
         if (s.premultiplyAlpha) s.bleed = false;
+        s.outputFormat = s.outputFormat.toLowerCase() === "jpg" || s.outputFormat.toLowerCase() === "jpeg" ? "jpg" : "png";
         // 불러온 확장자가 Unity 형식이면 Unity 를 켠다
         unity = s.atlasExtension === UNITY_ATLAS_EXT;
         if (!unity) extBeforeUnity = s.atlasExtension;

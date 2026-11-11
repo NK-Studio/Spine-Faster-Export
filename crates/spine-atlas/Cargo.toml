@@ -11,3 +11,7 @@ rayon = "1"
 serde.workspace = true
 serde_json.workspace = true
 unicode-normalization = "0.1"
+jpeg-encoder = "0.6.1"
+
+[dev-dependencies]
+zune-jpeg = "0.5"

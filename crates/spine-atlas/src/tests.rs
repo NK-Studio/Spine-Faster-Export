@@ -365,6 +365,7 @@ fn spine_pack_json() {
     let s: AtlasSettings = serde_json::from_str(j).unwrap();
     assert!(!s.strip_whitespace_x && s.pot && s.square && s.alias && s.max_width == 1024 && s.atlas_extension == ".atlas.txt");
     assert_eq!(s.bleed_iterations, 2);
+    assert_eq!((s.output_format.as_str(), s.jpeg_quality), ("png", 0.9));
     let back = serde_json::to_string(&s).unwrap();
     assert!(back.contains("\"premultiplyAlpha\":true") && back.contains("\"maxWidth\":1024"));
 }
@@ -797,6 +798,77 @@ fn folder_pack_json_scales_and_legacy() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn decode_jpeg(bytes: &[u8]) -> (usize, usize, Vec<u8>) {
+    let mut d = zune_jpeg::JpegDecoder::new(zune_jpeg::zune_core::bytestream::ZCursor::new(bytes));
+    let px = d.decode().unwrap();
+    let (w, h) = d.dimensions().unwrap();
+    (w, h, px)
+}
+
+/// JPEG 의 양자화 표(DQT 두 개, 지그재그 순서 그대로).
+fn dqt(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let mut v = Vec::new();
+    let mut i = 2;
+    while i + 4 <= bytes.len() && bytes[i] == 0xFF {
+        let len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+        if bytes[i + 1] == 0xDB {
+            v.push(bytes[i + 5..i + 5 + 64].to_vec());
+        }
+        if bytes[i + 1] == 0xDA {
+            break;
+        }
+        i += 2 + len;
+    }
+    v
+}
+
+#[test]
+fn jpg_output_flattens_on_black() {
+    // Spine 4.2 명령줄 패커로 확인한 것: JPG 는 PMA · 블리드 설정과 상관없이 같은 파일(검정 위에 얹은 RGB)이고,
+    // atlas 는 `이름.jpg` 와 설정 그대로의 `format:` · `pma:` 줄을 쓴다.
+    let dir = temp_dir("jpg");
+    let a = image(40, 20, 3, 1);
+    write(&dir, "a", 40, 20, &a);
+    for i in 0..4 {
+        write(&dir, &format!("big{i}"), 60, 60, &image(60, 60, 0, i));
+    }
+    let mut entries = vec![att("region", "a", "")];
+    entries.extend((0..4).map(|i| att("region", &format!("big{i}"), "")));
+    let m = model(entries);
+    let jpg = AtlasSettings { output_format: "jpg".into(), ..AtlasSettings::default() }.with_max_size(128);
+    let pma = pack(&m, &dir, "j", &jpg).unwrap();
+    let straight = pack(&m, &dir, "j", &AtlasSettings { pma: false, ..jpg.clone() }).unwrap();
+    let bleed = pack(&m, &dir, "j", &AtlasSettings { pma: false, bleed: true, format: PixelFormat::RGBA4444, ..jpg.clone() }).unwrap();
+    assert!(pma.pages.len() > 1);
+    assert!(pma.atlas_text.starts_with("j.jpg\nsize:") && pma.atlas_text.contains("\n\nj_2.jpg\n"), "{}", pma.atlas_text);
+    assert_eq!(pma.pages[1].name, "j_2.jpg");
+    assert!(pma.atlas_text.contains("pma:true") && !straight.atlas_text.contains("pma:"));
+    assert!(bleed.atlas_text.contains("format:RGBA4444\n"));
+    for ((p, s), b) in pma.pages.iter().zip(&straight.pages).zip(&bleed.pages) {
+        assert_eq!(p.rgba, s.rgba);
+        assert_eq!(p.rgba, b.rgba);
+        assert!(p.rgba.chunks_exact(4).all(|px| px[3] == 255));
+    }
+    // 영역 a 의 픽셀 = 미리 곱한 RGB(버림), 영역 밖 투명 픽셀은 검정
+    let png = pack(&m, &dir, "j", &AtlasSettings::default().with_max_size(128)).unwrap();
+    for (j, p) in pma.pages.iter().zip(&png.pages) {
+        for (x, y) in j.rgba.chunks_exact(4).zip(p.rgba.chunks_exact(4)) {
+            assert_eq!(&x[..3], &y[..3]);
+        }
+    }
+    assert_eq!(&pma.pages[0].rgba[..4], &[0, 0, 0, 255]);
+
+    // 인코딩: 크기 그대로 풀리고, 풀어 낸 그림이 원본과 가깝다
+    let bytes = encode_page(&pma.pages[0], &jpg).unwrap();
+    assert_eq!(&bytes[..4], &[0xFF, 0xD8, 0xFF, 0xE0]);
+    assert_eq!(&bytes[6..11], b"JFIF\0");
+    let (w, h, px) = decode_jpeg(&bytes);
+    assert_eq!((w as u32, h as u32), (pma.pages[0].width, pma.pages[0].height));
+    let err: u64 = px.chunks_exact(3).zip(pma.pages[0].rgba.chunks_exact(4)).map(|(d, s)| (0..3).map(|c| d[c].abs_diff(s[c]) as u64).sum::<u64>()).sum();
+    assert!((err as f64 / (w * h * 3) as f64) < 3.0, "평균 오차 {}", err as f64 / (w * h * 3) as f64);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn merge_pack_json_inherits() {
     let base = AtlasSettings { padding_x: 7, grid: true, ..Default::default() }.normalize();
@@ -831,4 +903,41 @@ fn region_order_is_ordinal() {
         "{text}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn jpeg_quality_tables_like_spine() {
+    // Spine 4.2 가 jpegQuality 0.9 · 0.5 · 0.33 으로 쓴 JPG 의 DQT 첫 여덟 값(휘도, 색차)
+    let page = AtlasPage { name: "x.jpg".into(), width: 17, height: 9, rgba: vec![255; 17 * 9 * 4] };
+    for (q, luma, chroma) in [
+        (0.9, [3, 2, 2, 3, 2, 2, 3, 3], [3, 4, 4, 5, 4, 5, 9, 5]),
+        (0.5, [16, 11, 12, 14, 12, 10, 16, 14], [17, 18, 18, 24, 21, 24, 47, 26]),
+        (0.33, [24, 17, 18, 21, 18, 15, 24, 21], [26, 27, 27, 36, 32, 36, 71, 39]),
+    ] {
+        let bytes = encode_jpeg(&page, q).unwrap();
+        let t = dqt(&bytes);
+        assert_eq!(t.len(), 2);
+        assert_eq!(&t[0][..8], &luma, "품질 {q}");
+        assert_eq!(&t[1][..8], &chroma, "품질 {q}");
+        // SOF0: Y 2×2, Cb · Cr 1×1(4:2:0). 품질이 높아도 4:4:4 로 바꾸지 않는다
+        let sof = bytes.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+        assert_eq!((bytes[sof + 11], bytes[sof + 14], bytes[sof + 17]), (0x22, 0x11, 0x11));
+    }
+    let (w, h, px) = decode_jpeg(&encode_jpeg(&page, 1.0).unwrap());
+    assert_eq!((w, h), (17, 9));
+    assert!(px.iter().all(|&v| v >= 250));
+}
+
+#[test]
+fn output_format_and_quality_settings() {
+    let s: AtlasSettings = serde_json::from_str(r#"{"outputFormat":"jpg","jpegQuality":0.75}"#).unwrap();
+    assert!(s.jpeg() && s.jpeg_quality == 0.75 && s.page_extension() == "jpg");
+    let back = serde_json::to_string(&s).unwrap();
+    assert!(back.contains("\"outputFormat\":\"jpg\"") && back.contains("\"jpegQuality\":0.75"), "{back}");
+    assert_eq!(AtlasSettings::default().jpeg_quality, 0.9);
+    assert_eq!(AtlasSettings::default().page_extension(), "png");
+    assert!(AtlasSettings { output_format: "JPEG".into(), ..AtlasSettings::default() }.jpeg());
+    assert!(AtlasSettings { output_format: "webp".into(), ..AtlasSettings::default() }.check().is_err());
+    assert!(AtlasSettings { output_format: "jpg".into(), jpeg_quality: 1.5, ..AtlasSettings::default() }.check().is_err());
+    assert!(AtlasSettings { output_format: "jpg".into(), jpeg_quality: 0.0, ..AtlasSettings::default() }.check().is_ok());
 }

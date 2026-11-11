@@ -382,7 +382,7 @@ fn write_atlas(
         report.files.push(atlas_path);
         for page in &atlas.pages {
             let path = out_dir.join(&page.name);
-            fs::write(&path, spine_atlas::encode_png(page))?;
+            fs::write(&path, spine_atlas::encode_page(page, pack)?)?;
             report.files.push(path);
         }
     }
@@ -433,7 +433,7 @@ pub fn export_single_atlas(project: &SpineProject, indices: &[usize], spine_path
 }
 
 /// 스켈레톤 하나를 내보내면 out_dir 에 생길 파일 중 이미 있는 것(덮어쓰기 확인용).
-/// 페이지 PNG 는 개수를 미리 알 수 없으므로 `이름.png` 와 `이름_<숫자>.png` 를 모두 본다.
+/// 페이지(PNG · JPG)는 개수를 미리 알 수 없으므로 `이름.png` 와 `이름_<숫자>.png` 를 모두 본다.
 pub fn existing_outputs(skeleton_name: &str, out_dir: &Path, opts: &ExportOptions) -> Vec<PathBuf> {
     let file_name = sanitize_file_name(skeleton_name);
     let mut found: Vec<PathBuf> = Vec::new();
@@ -455,7 +455,7 @@ pub fn existing_outputs(skeleton_name: &str, out_dir: &Path, opts: &ExportOption
     found
 }
 
-/// `base` 라는 이름으로 atlas 를 쓰면 덮어쓸 파일(atlas 와 페이지 PNG).
+/// `base` 라는 이름으로 atlas 를 쓰면 덮어쓸 파일(atlas 와 페이지 PNG · JPG).
 pub fn existing_atlas_outputs(base_name: &str, out_dir: &Path, opts: &ExportOptions) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = Vec::new();
     let mut check = |name: String| {
@@ -467,11 +467,12 @@ pub fn existing_atlas_outputs(base_name: &str, out_dir: &Path, opts: &ExportOpti
     let entries: Vec<String> = fs::read_dir(out_dir)
         .map(|rd| rd.filter_map(|e| e.ok()).filter_map(|e| e.file_name().into_string().ok()).collect())
         .unwrap_or_default();
+    let page_ext = format!(".{}", opts.pack.page_extension());
     for (_, suffix) in opts.pack.scales() {
         let base = format!("{base_name}{suffix}");
         check(format!("{base}{}", opts.pack.atlas_extension));
         for e in &entries {
-            if let Some(rest) = e.strip_prefix(&base).and_then(|r| r.strip_suffix(".png")) {
+            if let Some(rest) = e.strip_prefix(&base).and_then(|r| r.strip_suffix(page_ext.as_str())) {
                 // 이름.png, 이름_2.png …(separator 가 비었으면 이름2.png)
                 let digits = rest.strip_prefix(opts.pack.separator.as_str()).filter(|d| !d.is_empty());
                 if rest.is_empty() || digits.is_some_and(|d| d.bytes().all(|b| b.is_ascii_digit())) {
@@ -553,7 +554,9 @@ pub fn import_spine_settings(text: &str, base: &ExportOptions) -> SpineResult<Im
             o.pack = pack.normalize();
             o.atlas = true;
             let p = &obj["packAtlas"];
-            if !o.pack.output_format.eq_ignore_ascii_case("png") {
+            if o.pack.jpeg() {
+                o.pack.output_format = "jpg".into();
+            } else if !o.pack.output_format.eq_ignore_ascii_case("png") {
                 notes.push(format!("출력 형식 {} 은 지원하지 않아 PNG 로 바꿨습니다.", o.pack.output_format));
                 o.pack.output_format = "png".into();
             }
@@ -736,6 +739,42 @@ mod tests {
         let odd = r#"{"class":"export-binary","packAtlas":{"scale":[0.5],"scaleResampling":["lanczos"]}}"#;
         let got = import_spine_settings(odd, &ExportOptions::default()).unwrap();
         assert!(got.notes.iter().any(|n| n.contains("lanczos")), "{:?}", got.notes);
+    }
+
+    /// 출력 형식 JPG 와 JPEG 품질은 읽은 그대로 두고(예전에는 PNG 로 바꿨다), 다시 써도 같다.
+    #[test]
+    fn spine_settings_keep_jpg() {
+        let text = r#"{"class":"export-json","extension":".json","packAtlas":{"outputFormat":"jpg","jpegQuality":0.8,"premultiplyAlpha":true}}"#;
+        let got = import_spine_settings(text, &ExportOptions::default()).unwrap();
+        assert!(got.notes.iter().all(|n| !n.contains("출력 형식")), "{:?}", got.notes);
+        assert_eq!((got.options.pack.output_format.as_str(), got.options.pack.jpeg_quality), ("jpg", 0.8));
+        let saved = export_spine_settings(&got.options, None, None).unwrap();
+        assert!(saved.contains("\"outputFormat\": \"jpg\"") && saved.contains("\"jpegQuality\": 0.8"), "{saved}");
+        let again = import_spine_settings(&saved, &ExportOptions::default()).unwrap();
+        assert_eq!(again.options.pack, got.options.pack);
+        // 대문자 · "jpeg" 도 JPG 로, 모르는 형식은 PNG 로 바꾸고 알린다
+        let upper = import_spine_settings(&text.replace("\"jpg\"", "\"JPEG\""), &ExportOptions::default()).unwrap();
+        assert_eq!(upper.options.pack.output_format, "jpg");
+        let webp = import_spine_settings(&text.replace("\"jpg\"", "\"webp\""), &ExportOptions::default()).unwrap();
+        assert_eq!(webp.options.pack.output_format, "png");
+        assert!(webp.notes.iter().any(|n| n.contains("webp")));
+    }
+
+    /// JPG 로 내보낼 때 덮어쓸 페이지는 `.jpg` 다.
+    #[test]
+    fn existing_outputs_jpg_pages() {
+        let dir = std::env::temp_dir().join(format!("sfe-existing-jpg-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for f in ["hero.atlas.txt", "hero.png", "hero.jpg", "hero_2.jpg", "hero_x.jpg"] {
+            fs::write(dir.join(f), b"x").unwrap();
+        }
+        let mut opts = ExportOptions::preset_anc();
+        opts.pack.output_format = "jpg".into();
+        let mut got: Vec<String> = existing_atlas_outputs("hero", &dir, &opts).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        got.sort();
+        assert_eq!(got, vec!["hero.atlas.txt", "hero.jpg", "hero_2.jpg"]);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// 프런트엔드가 보내는 모양(camelCase, pack 안에 pack.json 키) 그대로 읽힌다.
