@@ -137,7 +137,7 @@ const en: Record<string, string> = {
 
   // 텍스처 아틀라스 탭
   "팩": "Pack",
-  "내보낼 때 텍스처 아틀라스(atlas + PNG)도 함께 만듭니다": "Also builds a texture atlas (atlas + PNG) when exporting",
+  "내보낼 때 텍스처 아틀라스(atlas + 페이지 이미지)도 함께 만듭니다": "Also builds a texture atlas (atlas + page images) when exporting",
   "어태치먼트": "Attachments",
   "이미지 폴더": "Image folders",
   "어태치먼트: 첨부가 쓰는 이미지만 · 이미지 폴더: 스켈레톤 이미지 폴더의 이미지 모두":
@@ -288,9 +288,11 @@ const en: Record<string, string> = {
   "확대 필터(atlas filter)": "Magnification filter (atlas filter)",
   "가로 랩(atlas repeat)": "Horizontal wrap (atlas repeat)",
   "세로 랩(atlas repeat)": "Vertical wrap (atlas repeat)",
-  "런타임이 텍스처를 올릴 픽셀 형식(atlas format). PNG 는 RGBA 로 저장합니다": "Pixel format the runtime uploads the texture in (atlas format). PNGs are saved as RGBA",
-  "JPG (지원 안 함)": "JPG (not supported)",
-  "이 앱은 PNG 만 만듭니다": "This app only writes PNG",
+  "런타임이 텍스처를 올릴 픽셀 형식(atlas format). 파일은 PNG 면 RGBA, JPG 면 RGB 로 저장합니다": "Pixel format the runtime uploads the texture in (atlas format). Files are saved as RGBA for PNG and RGB for JPG",
+  "페이지 파일 형식. JPG 는 알파가 없어 투명한 곳을 검정으로 채우고, 알파 프리멀티플라이·블리드와 상관없이 색에 알파를 곱해 씁니다(Spine 과 같음)":
+    "Page file format. JPG has no alpha: transparent areas become black and colors are multiplied by alpha regardless of Premultiply alpha and Bleed (same as Spine)",
+  "JPEG 품질": "JPEG quality",
+  "JPG 품질(0~1). 높을수록 선명하고 파일이 큽니다": "JPG quality (0–1). Higher is sharper and makes larger files",
   "직사각형: 촘촘히 · 그리드: 같은 크기 칸에 차례로 · 다각형: 메시만 쓰는 이미지를 메시 모양대로 더 촘촘히(느림)":
     "Rectangles: tightly packed · Grid: in order in equal-size cells · Polygons: images used only by meshes are packed by mesh shape, tighter but slower",
   "미리 곱한 알파로 저장합니다(atlas pma)": "Saves with premultiplied alpha (atlas pma)",

@@ -9,6 +9,8 @@ spine-model.workspace = true
 png = "0.18"
 rayon = "1"
 serde.workspace = true
+jpeg-encoder = "0.6.1"
 
 [dev-dependencies]
 serde_json.workspace = true
+zune-jpeg = "0.5"

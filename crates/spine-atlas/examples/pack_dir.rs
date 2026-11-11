@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use spine_atlas::{decode_png_file, encode_png, pack, AtlasSettings};
+use spine_atlas::{decode_png_file, encode_page, pack, AtlasSettings};
 use spine_model::{ModelAttachment, ModelSkin, ModelSkinEntry, SkeletonModel};
 
 fn walk(dir: &Path, base: &Path, out: &mut Vec<String>) {
@@ -70,7 +70,7 @@ fn main() {
     std::fs::create_dir_all(&out).unwrap();
     std::fs::write(out.join(format!("{}.atlas", name)), &atlas.atlas_text).unwrap();
     let pngs: Vec<Vec<u8>> = std::thread::scope(|sc| {
-        let hs: Vec<_> = atlas.pages.iter().map(|p| sc.spawn(move || encode_png(p))).collect();
+        let hs: Vec<_> = atlas.pages.iter().map(|p| sc.spawn(|| encode_page(p, &s).unwrap())).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
     let t2 = Instant::now();

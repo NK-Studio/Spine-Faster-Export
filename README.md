@@ -23,7 +23,7 @@ Spine 프로그램 없이 `.spine` 프로젝트에서 고른 스켈레톤만 런
 
 아래 **설정 불러오기… / 설정 저장…** 은 Spine 내보내기 대화상자의 Save 로 만든 설정 JSON(`"class": "export-json"` · `"export-binary"`)을 읽고 씁니다. 출력 폴더는 불러온 뒤 알림의 «출력 폴더도 적용»을 눌러야 바뀝니다.
 
-팩 설정 대화상자의 **Load / Save** 는 Spine 이 쓰는 `pack.json` 을 그대로 읽고 씁니다. 출력 형식은 PNG 만 되고, *Auto scale* 은 지원하지 않습니다. *Legacy output* 을 켜면 3.8 이하 런타임이 읽는 옛 atlas 형식으로 씁니다(런타임 버전을 3.8 로 고르면 Spine 처럼 꺼져 있어도 옛 형식으로 씁니다). 메시만 쓰는 이미지는 패킹 방식과 상관없이 Spine 처럼 메시 UV 범위로 자릅니다. *Packing: Polygons* 는 메시만 쓰는 이미지를 메시가 덮는 모양대로 묶습니다(영역 첨부가 쓰는 이미지는 사각형 그대로이고, 페이지 안 배치는 Spine 과 다릅니다). Spine 처럼 다각형 모양은 사각형보다 1픽셀 가깝게 놓습니다(여백 2 면 모양 사이 빈 픽셀이 1줄 이상). *Combine subdirectories* 는 «이미지 폴더»로 묶을 때만 씁니다(폴더 안 `pack.json` 은 읽지 않습니다). *Format* 은 atlas 의 `format:` 줄만 바꾸고 PNG 는 RGBA 로 저장합니다.
+팩 설정 대화상자의 **Load / Save** 는 Spine 이 쓰는 `pack.json` 을 그대로 읽고 씁니다. 출력 형식은 PNG 와 JPG 이고(*JPEG quality* 포함), *Auto scale* 은 지원하지 않습니다. JPG 는 알파가 없어 Spine 처럼 투명한 곳을 검정으로 채우고 색에 알파를 곱해 씁니다. *Premultiply alpha* · *Bleed* 는 JPG 픽셀을 바꾸지 않고, atlas 의 `pma:` 줄만 설정을 따릅니다. 양자화 표와 4:2:0 크로마 축소도 Spine 과 같아서 풀어 보면 Spine 의 JPG 와 거의 같습니다(인코더 내부 반올림 차이로 몇 단계까지 다를 수 있습니다). *Legacy output* 을 켜면 3.8 이하 런타임이 읽는 옛 atlas 형식으로 씁니다(런타임 버전을 3.8 로 고르면 Spine 처럼 꺼져 있어도 옛 형식으로 씁니다). 메시만 쓰는 이미지는 패킹 방식과 상관없이 Spine 처럼 메시 UV 범위로 자릅니다. *Packing: Polygons* 는 메시만 쓰는 이미지를 메시가 덮는 모양대로 묶습니다(영역 첨부가 쓰는 이미지는 사각형 그대로이고, 페이지 안 배치는 Spine 과 다릅니다). Spine 처럼 다각형 모양은 사각형보다 1픽셀 가깝게 놓습니다(여백 2 면 모양 사이 빈 픽셀이 1줄 이상). *Combine subdirectories* 는 «이미지 폴더»로 묶을 때만 씁니다(폴더 안 `pack.json` 은 읽지 않습니다). *Format* 은 atlas 의 `format:` 줄만 바꾸고, 파일은 PNG 면 RGBA, JPG 면 RGB 로 저장합니다.
 
 ## 구조
 
@@ -33,7 +33,7 @@ Spine 프로그램 없이 `.spine` 프로젝트에서 고른 스켈레톤만 런
 | `crates/spine-project` | `.spine` 컨테이너·스키마·객체 그래프 읽기 → 모델 |
 | `crates/spine-json` | 모델 → 런타임 JSON (3.8, 4.0 ~ 4.3) |
 | `crates/spine-binary` | 모델 → `.skel`, 애니메이션 정리 |
-| `crates/spine-atlas` | 이미지 → atlas + PNG (Spine Texture Packer Settings: 여백·회전·POT·격자·배율 등) |
+| `crates/spine-atlas` | 이미지 → atlas + PNG · JPG (Spine Texture Packer Settings: 여백·회전·POT·격자·배율 등) |
 | `crates/spine-export` | 내보내기 파사드 + `spine-export-cli` |
 | `src-tauri` | Tauri 백엔드(열기·병렬 내보내기·파일 연결) |
 | `src` | 프런트엔드(바닐라 TS, 디자인 시트 토큰) |
@@ -41,6 +41,10 @@ Spine 프로그램 없이 `.spine` 프로젝트에서 고른 스켈레톤만 런
 ## 글꼴
 
 IBM Plex Sans KR(Regular · Medium · SemiBold · Bold)을 `src/assets/fonts/ibm-plex-sans-kr/` 에 싣습니다. SIL Open Font License 1.1(같은 폴더의 `OFL.txt`).
+
+## JPEG 인코더
+
+JPG 페이지는 [`jpeg-encoder`](https://crates.io/crates/jpeg-encoder)(MIT 또는 Apache-2.0, IJG)로 씁니다. This software is based in part on the work of the Independent JPEG Group.
 
 ## 개발
 
