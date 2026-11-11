@@ -1,28 +1,28 @@
-# v* 태그를 푸시하면 macOS(DMG)·Windows(설치 프로그램) 배포본을 빌드해 GitHub 릴리스에 올린다.
-name: build
+# v* 태그를 푸시하면 macOS(Apple Silicon, DMG)·Windows(x64, 설치 프로그램) 빌드를 GitHub 릴리스에 올린다.
+# 수동 실행(workflow_dispatch)은 빌드만 하고 결과물을 Actions 아티팩트로 남긴다.
+name: Build & Release
 
 on:
-  workflow_dispatch:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Apple Silicon 만 지원한다(인텔 맥 빌드 없음).
-          - platform: macos-latest
-            target: aarch64-apple-darwin
-          - platform: windows-latest
-            target: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.platform }}
+  build-macos:
+    name: Build macOS (Apple Silicon)
+    runs-on: macos-15 # arm64 러너
     env:
-      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -30,48 +30,126 @@ jobs:
       - uses: actions/setup-node@v7
         with: { node-version: latest, cache: pnpm }
       - uses: dtolnay/rust-toolchain@stable
-        with: { targets: "${{ matrix.target }}" }
+        with: { targets: aarch64-apple-darwin }
       - uses: Swatinem/rust-cache@v2
       - run: pnpm install --frozen-lockfile
       - run: cargo test --workspace --exclude spine-faster-export --release
 
-      # 맥 서명. Developer ID 인증서(.p12, base64) 시크릿이 있으면 그것으로 서명하고,
-      # App Store Connect API 키까지 있으면 공증한다. 없으면 ad-hoc 서명만 한다
+      # Developer ID 인증서(.p12, base64)가 시크릿에 있으면 Tauri 가 그것으로 앱·DMG 를 서명하고,
+      # App Store Connect API 키까지 있으면 앱을 공증한다. 없으면 ad-hoc 서명만 한다
       # (Apple Silicon 은 서명 없는 앱을 실행하지 않는다).
-      - name: macOS 서명 설정
-        if: runner.os == 'macOS'
-        shell: bash
+      - name: Signing setup
         env:
-          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
-          if [ -z "$MACOS_CERT_P12" ]; then
+          if [ -z "$APPLE_CERTIFICATE" ]; then
             echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
-            echo "인증서 시크릿이 없어 ad-hoc 서명합니다"
+            echo "::warning::APPLE_CERTIFICATE 시크릿이 없어 ad-hoc 서명합니다(공증 안 함)"
             exit 0
           fi
-          {
-            echo "APPLE_CERTIFICATE=$MACOS_CERT_P12"
-            echo "APPLE_CERTIFICATE_PASSWORD=$MACOS_CERT_PASSWORD"
-          } >> "$GITHUB_ENV"
+          echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
           if [ -n "$APPLE_API_KEY_P8" ]; then
-            echo "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/notary.p8"
+            printf '%s\n' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
             {
+              # Tauri 는 APPLE_API_KEY 에 키 ID 를, APPLE_API_KEY_PATH 에 .p8 경로를 받는다.
               echo "APPLE_API_KEY=$APPLE_API_KEY_ID"
               echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
-              echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/notary.p8"
+              echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8"
+              echo "NOTARIZE=1"
             } >> "$GITHUB_ENV"
           fi
 
-      - uses: tauri-apps/tauri-action@v1
+      # 끌어다 놓아 설치하는 DMG(왼쪽 Quick Spine → 오른쪽 Applications, 화살표 배경).
+      # 창 배치는 src-tauri/tauri.conf.json 의 bundle.macOS.dmg. Tauri 는 CI 에서 Finder 배치를 건너뛰므로 끈다.
+      - name: Build Quick Spine.app + DMG
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_BUNDLER_DMG_IGNORE_CI: "true"
+        run: pnpm tauri build --target aarch64-apple-darwin --bundles app,dmg
+
+      - name: Notarize DMG
+        if: env.NOTARIZE == '1'
+        run: |
+          DMG=$(ls target/aarch64-apple-darwin/release/bundle/dmg/*.dmg)
+          xcrun notarytool submit "$DMG" \
+            --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait
+          xcrun stapler staple "$DMG"
+          spctl -a -vv -t open --context context:primary-signature "$DMG"
+
+      - name: Collect
+        run: |
+          mkdir -p dist
+          cp target/aarch64-apple-darwin/release/bundle/dmg/*.dmg "dist/QuickSpine-${{ github.ref_name }}-macos-arm64.dmg"
+          codesign -dv "target/aarch64-apple-darwin/release/bundle/macos/Quick Spine.app" 2>&1 | grep -E 'Authority|Signature' || true
+          ls -la dist
+      - name: Remove API key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/AuthKey.p8"
+      - uses: actions/upload-artifact@v7
         with:
-          # 맥은 .app 과 설치용 .dmg, 윈도는 NSIS·MSI 설치 프로그램을 만든다.
-          args: --target ${{ matrix.target }} --bundles ${{ runner.os == 'macOS' && 'app,dmg' || 'nsis,msi' }}
-          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-          releaseName: "Quick Spine ${{ github.ref_name }}"
-          releaseDraft: false
-          prerelease: false
+          name: macos-arm64
+          path: dist/*
+
+  build-windows:
+    name: Build Windows (x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with: { version: 10 }
+      - uses: actions/setup-node@v7
+        with: { node-version: latest, cache: pnpm }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: x86_64-pc-windows-msvc }
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm install --frozen-lockfile
+      - run: cargo test --workspace --exclude spine-faster-export --release
+      - name: Build installers
+        run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis,msi
+      - name: Collect
+        shell: bash
+        run: |
+          B=target/x86_64-pc-windows-msvc/release/bundle
+          mkdir -p dist
+          cp "$B"/nsis/*-setup.exe "dist/QuickSpine-${{ github.ref_name }}-windows-x64-setup.exe"
+          cp "$B"/msi/*.msi "dist/QuickSpine-${{ github.ref_name }}-windows-x64.msi"
+          ls -la dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-x64
+          path: dist/*
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - uses: softprops/action-gh-release@v3
+        with:
+          name: Quick Spine ${{ github.ref_name }}
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            ## 내려받기
+
+            | OS | 파일 |
+            | --- | --- |
+            | macOS (Apple Silicon, macOS 11 이상) | `QuickSpine-${{ github.ref_name }}-macos-arm64.dmg` |
+            | Windows 10/11 (x64) | `QuickSpine-${{ github.ref_name }}-windows-x64-setup.exe` (또는 `.msi`) |
+
+            ### macOS 설치
+            DMG 를 열고 창 안의 `Quick Spine` 을 옆의 `Applications` 폴더로 끌어다 놓으면 설치됩니다.
+            Developer ID 서명이 없는 빌드라면 처음 열 때 막히니, **시스템 설정 → 개인정보 보호 및 보안 → 그래도 열기** 를 누르세요.
+
+            ### Windows 설치
+            SmartScreen 경고가 뜨면 **추가 정보 → 실행** 을 누르세요. Windows 10/11 에 기본 포함된 WebView2 런타임을 씁니다.

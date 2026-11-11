@@ -259,7 +259,7 @@ $("#app").innerHTML = `
 
 <footer class="footer">
   <span class="grow" id="foot-msg"></span>
-  <span class="ver">v0.2.0</span>
+  <span class="ver">v0.2.1</span>
   <div class="foot-progress" id="progress"><i></i></div>
 </footer>
 
