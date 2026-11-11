@@ -3217,7 +3217,7 @@ dependencies = [
 
 [[package]]
 name = "spine-atlas"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "png",
  "rayon",
@@ -3228,7 +3228,7 @@ dependencies = [
 
 [[package]]
 name = "spine-binary"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "sha1_smol",
@@ -3238,7 +3238,7 @@ dependencies = [
 
 [[package]]
 name = "spine-export"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3251,7 +3251,7 @@ dependencies = [
 
 [[package]]
 name = "spine-faster-export"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3265,7 +3265,7 @@ dependencies = [
 
 [[package]]
 name = "spine-json"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "spine-model",
@@ -3273,11 +3273,11 @@ dependencies = [
 
 [[package]]
 name = "spine-model"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "spine-project"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "serde_json",
