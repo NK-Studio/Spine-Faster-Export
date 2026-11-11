@@ -17,6 +17,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use unicode_normalization::UnicodeNormalization;
+
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use spine_model::{AtlasOutput, AtlasPage, ModelAttachment, ModelSkin, ModelSkinEntry, SkeletonModel, SpineError, SpineResult};
@@ -1268,7 +1270,8 @@ pub fn folder_sources(model: &SkeletonModel, images_dir: &Path, settings: &Atlas
     while let Some((dir, prefix, group, unit)) = stack.pop() {
         for entry in std::fs::read_dir(&dir)?.filter_map(|e| e.ok()) {
             let path = entry.path();
-            let Some(file) = path.file_name().and_then(|f| f.to_str()).map(str::to_owned) else { continue };
+            // 영역 이름은 NFC 로: macOS 는 한글 파일 이름을 NFD 로 돌려주지만 Spine 은 NFC 로 쓰고, 첨부 이름도 NFC 다
+            let Some(file) = path.file_name().and_then(|f| f.to_str()).map(|f| f.nfc().collect::<String>()) else { continue };
             if file.starts_with('.') {
                 continue;
             }
@@ -1438,12 +1441,14 @@ fn pack_at(sources: &[Source], name: &str, root: &AtlasSettings, suffix: &str) -
         // Spine: 첫 페이지는 이름 그대로, 다음부터 `이름 + separator + 번호`(2부터)
         let file_name = if i == 0 { format!("{name}.png") } else { format!("{name}{}{}.png", root.separator, i + 1) };
         write_page_header(&mut text, &file_name, page, settings, scale, i == 0);
-        // 이름 순(자연 순, 같으면 index 순)으로 쓴다. 안정 정렬(C# OrderBy · 파이썬 sorted 와 같음).
+        // Spine 처럼 이름 Ordinal 순(UTF-16, 대소문자 구분: `Line_root` < `bird`, `a10` < `a2`)으로 쓰고,
+        // 같은 이름이면 index 오름차순, index 가 없는 것은 그 뒤에 둔다(Spine 4.2.43 으로 확인).
         // 같은 그림을 함께 쓰는 영역(에일리어스)은 Spine 처럼 그 그림을 실은 영역 바로 뒤에 이름 순으로 붙인다.
         let by_name = |list: &[usize]| -> Vec<usize> {
             let keys: Vec<Vec<u16>> = list.iter().map(|&i| regions[i].out_name.encode_utf16().collect()).collect();
             let mut order: Vec<usize> = (0..list.len()).collect();
-            order.sort_by(|&a, &b| natural::natural_cmp16(&keys[a], &keys[b]).then(regions[list[a]].index.cmp(&regions[list[b]].index)));
+            let index = |i: usize| regions[list[i]].index.map_or((1, 0), |n| (0, n));
+            order.sort_by(|&a, &b| keys[a].cmp(&keys[b]).then(index(a).cmp(&index(b))));
             order.into_iter().map(|o| list[o]).collect()
         };
         let mut ids: Vec<usize> = Vec::with_capacity(page.regions.len());

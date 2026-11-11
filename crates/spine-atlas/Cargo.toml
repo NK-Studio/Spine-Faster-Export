@@ -10,3 +10,4 @@ png = "0.18"
 rayon = "1"
 serde.workspace = true
 serde_json.workspace = true
+unicode-normalization = "0.1"

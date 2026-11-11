@@ -771,3 +771,25 @@ fn merge_pack_json_inherits() {
     assert!(merge_pack_json(&base, "[1]").is_err());
     assert!(merge_pack_json(&base, r#"{"paddingX":"x"}"#).is_err());
 }
+
+/// atlas 안 영역 순서: Spine 4.2.43 처럼 이름 Ordinal 순(대소문자 구분), 같은 이름은 index 오름차순, index 없는 것은 뒤에.
+#[test]
+fn region_order_is_ordinal() {
+    let dir = temp_dir("ordinal");
+    let names = ["B_1", "Line_root", "bird", "fr", "fr_1", "fr_10", "fr_2", "x10", "x9", "레이어 3", "레이어_10"];
+    for (i, n) in names.iter().enumerate() {
+        // 파일 이름은 NFD 로(macOS 가 돌려주는 모양): 영역 이름은 NFC 로 나와야 한다
+        let nfd: String = unicode_normalization::UnicodeNormalization::nfd(*n).collect();
+        write(&dir, &nfd, 6, 6, &image(6, 6, 0, i as u8 * 20));
+    }
+    let s = AtlasSettings { use_indexes: true, pma: false, ..Default::default() };
+    let sources = folder_sources(&SkeletonModel::default(), &dir, &s).unwrap();
+    let text = pack_sources_scales(&sources, "t", &s).unwrap().remove(0).1.output.atlas_text;
+    let order: Vec<&str> = text.lines().skip(3).filter(|l| !l.starts_with("bounds:")).collect();
+    assert_eq!(
+        order,
+        ["B", "index:1", "Line_root", "bird", "fr", "index:1", "fr", "index:2", "fr", "index:10", "fr", "x10", "x9", "레이어", "index:10", "레이어 3"],
+        "{text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
