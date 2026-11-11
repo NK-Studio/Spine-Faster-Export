@@ -252,6 +252,10 @@ const en: Record<string, string> = {
   "블리드": "Bleed",
   "크기 조정": "Scale",
   "접미사": "Suffix",
+  "리샘플링": "Resampling",
+  "리샘플링 {m}": "Resampling {m}",
+  "배율을 적용할 때 쓰는 방법. Auto · Bicubic: 넓이 평균(부드러움) · Bilinear: 선형 보간 · Nearest: 가장 가까운 픽셀(도트 그림). Spine 에서 Auto 는 Bicubic 과, Bilinear progressive 는 Bilinear 와 결과가 같습니다":
+    "How images are resized for each scale. Auto · Bicubic: area averaging (smooth) · Bilinear: linear interpolation · Nearest: nearest pixel (pixel art). In Spine, Auto gives the same result as Bicubic, and Bilinear progressive the same as Bilinear",
   "옵션": "Options",
   "아틀라스 확장자": "Atlas extension",
   "하위 폴더 합치기": "Combine subdirectories",

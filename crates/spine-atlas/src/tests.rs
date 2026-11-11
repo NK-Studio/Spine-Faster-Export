@@ -302,6 +302,45 @@ fn blank_flatten_scale_debug_duplicate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 배율마다 고른 리샘플링 방식을 쓴다(값은 Spine 4.2 명령줄 패커의 결과).
+#[test]
+fn scale_resampling_per_scale() {
+    let dir = temp_dir("resample");
+    // 8x1: 칸마다 다른 불투명 색(R 에 칸 번호)
+    let px: Vec<u8> = (0..8u8).flat_map(|x| [x * 30, 0, 0, 255]).collect();
+    write(&dir, "row", 8, 1, &px);
+    let m = model(vec![att("region", "row", "")]);
+    let base = AtlasSettings { strip_whitespace_x: false, strip_whitespace_y: false, rotation: false, pma: false, ..AtlasSettings::default() };
+    let s = AtlasSettings {
+        scale: vec![0.75, 0.75, 2.0],
+        scale_suffix: vec!["@n".into(), "@b".into(), "@a".into()],
+        scale_resampling: vec!["nearest".into(), "bilinear".into()], // 세 번째는 비었으니 bicubic
+        ..base.clone()
+    };
+    assert_eq!(
+        s.scale_list().iter().map(|x| x.2).collect::<Vec<_>>(),
+        vec![Resampling::Nearest, Resampling::Bilinear, Resampling::Area]
+    );
+    let all = pack_scales(&m, &dir, "m", &s).unwrap();
+    let row = |i: usize| {
+        let out = &all[i].1.output;
+        let r = &rects(&out.atlas_text)[0];
+        let p = &out.pages[0];
+        (0..r.3 as usize).map(|x| p.rgba[((r.2 as usize) * p.width as usize + r.1 as usize + x) * 4]).collect::<Vec<u8>>()
+    };
+    // nearest 8→6: Spine 이 고른 원본 칸 0 1 3 4 5 7
+    assert_eq!(row(0), [0, 1, 3, 4, 5, 7].map(|x| x * 30));
+    // bilinear 은 이웃 칸을 섞는다
+    assert!(row(1).iter().any(|v| v % 30 != 0), "{:?}", row(1));
+    // bicubic(넓이 평균) 정수 배율 확대는 픽셀 복제
+    assert_eq!(row(2), (0..16u8).map(|x| x / 2 * 30).collect::<Vec<_>>());
+    // pack.json 의 이름
+    let j: AtlasSettings = serde_json::from_str(r#"{"scale":[0.5,2],"scaleSuffix":["@h","@d"],"scaleResampling":["auto","bilinearProgressive"]}"#).unwrap();
+    assert_eq!(j.scale_list().iter().map(|x| x.2).collect::<Vec<_>>(), vec![Resampling::Area, Resampling::Bilinear]);
+    assert!(serde_json::to_string(&j).unwrap().contains(r#""scaleResampling":["auto","bilinearProgressive"]"#));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn duplicate_padding_copies_edges() {
     let mut out = vec![0u8; 6 * 4 * 4];

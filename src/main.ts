@@ -113,6 +113,7 @@ const DEFAULT_PACK: PackSettings = {
   bleedIterations: 2,
   scale: [1],
   scaleSuffix: [""],
+  scaleResampling: ["bicubic"],
   atlasExtension: ".atlas",
   combineSubdirectories: false,
   flattenPaths: false,

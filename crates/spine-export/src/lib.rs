@@ -543,6 +543,11 @@ pub fn import_spine_settings(text: &str, base: &ExportOptions) -> SpineResult<Im
                 notes.push(format!("출력 형식 {} 은 지원하지 않아 PNG 로 바꿨습니다.", o.pack.output_format));
                 o.pack.output_format = "png".into();
             }
+            for m in &o.pack.scale_resampling {
+                if spine_atlas::Resampling::parse(m).is_none() {
+                    notes.push(format!("모르는 리샘플링 «{m}» 은 bicubic 으로 바꿨습니다."));
+                }
+            }
             if p.get("autoScale").and_then(Value::as_bool) == Some(true) {
                 notes.push("Auto scale 은 지원하지 않습니다.".into());
             }
@@ -707,6 +712,16 @@ mod tests {
         assert_eq!((o.format, o.json_format, o.pretty_print, o.atlas), (SkeletonFormat::Json, JsonFormat::Minimal, true, false));
         assert_eq!((o.json_ext.as_str(), got.version.as_deref()), (".txt", Some("4.1")));
         assert!(import_spine_settings(r#"{"class":"export-png"}"#, &ExportOptions::default()).is_err());
+
+        // 배율별 리샘플링: 저장했다 다시 읽어도 같고, 모르는 이름은 알린다
+        let scaled = r#"{"class":"export-binary","packAtlas":{"scale":[0.5,2],"scaleSuffix":["@h","@d"],"scaleResampling":["nearest","bilinear"]}}"#;
+        let got = import_spine_settings(scaled, &ExportOptions::default()).unwrap();
+        assert_eq!(got.options.pack.scale_resampling, ["nearest", "bilinear"]);
+        let saved = export_spine_settings(&got.options, None, None).unwrap();
+        assert!(saved.contains("\"nearest\"") && saved.contains("\"bilinear\""), "{saved}");
+        let odd = r#"{"class":"export-binary","packAtlas":{"scale":[0.5],"scaleResampling":["lanczos"]}}"#;
+        let got = import_spine_settings(odd, &ExportOptions::default()).unwrap();
+        assert!(got.notes.iter().any(|n| n.contains("lanczos")), "{:?}", got.notes);
     }
 
     /// 프런트엔드가 보내는 모양(camelCase, pack 안에 pack.json 키) 그대로 읽힌다.

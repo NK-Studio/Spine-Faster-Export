@@ -22,6 +22,7 @@ use spine_model::{AtlasOutput, AtlasPage, ModelAttachment, ModelSkin, ModelSkinE
 
 pub use natural::natural_cmp;
 pub use png_codec::decode_file as decode_png_file;
+pub use resize::Resampling;
 
 const SCORE_SHIFT: i64 = 16;
 const BEST_NONE: i64 = 1 << 40;
@@ -144,6 +145,8 @@ pub struct AtlasSettings {
     pub scale: Vec<f32>,
     /// 배율별 파일 이름 접미사.
     pub scale_suffix: Vec<String>,
+    /// 배율별 리샘플링 방식(Spine 이름: `auto` · `nearest` · `bilinear` · `bilinearProgressive` · `bicubic`). 모자라면 `bicubic`.
+    pub scale_resampling: Vec<String>,
     // Options
     pub atlas_extension: String,
     /// 이 앱은 스켈레톤 첨부로 묶으므로 쓰지 않는다(Spine `pack.json` 호환을 위해 둔다).
@@ -199,6 +202,7 @@ impl Default for AtlasSettings {
             bleed_iterations: 2,
             scale: vec![1.0],
             scale_suffix: vec![String::new()],
+            scale_resampling: vec!["bicubic".into()],
             atlas_extension: ".atlas".into(),
             combine_subdirectories: false,
             flatten_paths: false,
@@ -246,15 +250,23 @@ impl AtlasSettings {
 
     /// 쓸 배율과 접미사 목록. 0 이하 배율은 뺀다. 비면 (1, "").
     pub fn scales(&self) -> Vec<(f32, String)> {
-        let mut v: Vec<(f32, String)> = self
+        self.scale_list().into_iter().map(|(s, sfx, _)| (s, sfx)).collect()
+    }
+
+    /// [`scales`](Self::scales) 에 배율마다 리샘플링 방식을 더한 것. 없거나 모르는 이름은 `bicubic`(넓이 평균).
+    pub fn scale_list(&self) -> Vec<(f32, String, Resampling)> {
+        let mut v: Vec<(f32, String, Resampling)> = self
             .scale
             .iter()
             .enumerate()
             .filter(|(_, s)| s.is_finite() && **s > 0.0)
-            .map(|(i, s)| (*s, self.scale_suffix.get(i).cloned().unwrap_or_default()))
+            .map(|(i, s)| {
+                let method = self.scale_resampling.get(i).and_then(|m| Resampling::parse(m)).unwrap_or(Resampling::Area);
+                (*s, self.scale_suffix.get(i).cloned().unwrap_or_default(), method)
+            })
             .collect();
         if v.is_empty() {
-            v.push((1.0, String::new()));
+            v.push((1.0, String::new(), Resampling::Area));
         }
         v
     }
@@ -1126,9 +1138,9 @@ pub fn encode_png(page: &AtlasPage) -> Vec<u8> {
 
 /// [`pack`] 과 같고, 빠지거나 뺀 영역 이름도 돌려준다.
 pub fn pack_detailed(model: &SkeletonModel, images_dir: &Path, name: &str, settings: &AtlasSettings) -> SpineResult<PackResult> {
-    let (scale, suffix) = settings.scales().remove(0);
+    let (scale, suffix, method) = settings.scale_list().remove(0);
     let sources = attachment_sources(model, images_dir)?;
-    pack_at(&sources, &format!("{name}{suffix}"), settings, scale)
+    pack_at(&sources, &format!("{name}{suffix}"), settings, scale, method)
 }
 
 /// 배율마다 하나씩: (접미사, 결과). 파일 이름은 `name + 접미사`.
@@ -1140,9 +1152,9 @@ pub fn pack_scales(model: &SkeletonModel, images_dir: &Path, name: &str, setting
 pub fn pack_sources_scales(sources: &[Source], name: &str, settings: &AtlasSettings) -> SpineResult<Vec<(String, PackResult)>> {
     settings.check()?;
     settings
-        .scales()
+        .scale_list()
         .into_iter()
-        .map(|(scale, suffix)| pack_at(sources, &format!("{name}{suffix}"), settings, scale).map(|r| (suffix, r)))
+        .map(|(scale, suffix, method)| pack_at(sources, &format!("{name}{suffix}"), settings, scale, method).map(|r| (suffix, r)))
         .collect()
 }
 
@@ -1256,7 +1268,7 @@ pub fn merge_sources(lists: Vec<Vec<Source>>) -> (Vec<Source>, Vec<String>) {
     (out, clash)
 }
 
-fn pack_at(sources: &[Source], name: &str, settings: &AtlasSettings, scale: f32) -> SpineResult<PackResult> {
+fn pack_at(sources: &[Source], name: &str, settings: &AtlasSettings, scale: f32, method: Resampling) -> SpineResult<PackResult> {
     settings.check()?;
     if sources.is_empty() {
         return Err(SpineError::Format("묶을 이미지가 없습니다".into()));
@@ -1276,7 +1288,7 @@ fn pack_at(sources: &[Source], name: &str, settings: &AtlasSettings, scale: f32)
             let (w, h, mut rgba) = png_codec::decode_file(path)?;
             let (mut w, mut h) = (w as i32, h as i32);
             if scale != 1.0 {
-                let (nw, nh, px) = resize::resize(w as usize, h as usize, &rgba, scale);
+                let (nw, nh, px) = resize::resize(w as usize, h as usize, &rgba, scale, method);
                 (w, h, rgba) = (nw as i32, nh as i32, px);
             }
             // 메시만 쓰는 이미지는 패킹 방식과 상관없이 메시가 걸친 범위로 자른다
@@ -1477,3 +1489,8 @@ fn pack_at(sources: &[Source], name: &str, settings: &AtlasSettings, scale: f32)
 
 #[cfg(test)]
 mod tests;
+
+#[doc(hidden)]
+pub fn resize_for_probe(w: usize, h: usize, rgba: &[u8], scale: f32, method: &str) -> (usize, usize, Vec<u8>) {
+    resize::resize(w, h, rgba, scale, Resampling::parse(method).expect("방식"))
+}

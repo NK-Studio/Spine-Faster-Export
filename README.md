@@ -23,7 +23,7 @@ Spine 프로그램 없이 `.spine` 프로젝트에서 고른 스켈레톤만 런
 
 아래 **설정 불러오기… / 설정 저장…** 은 Spine 내보내기 대화상자의 Save 로 만든 설정 JSON(`"class": "export-json"` · `"export-binary"`)을 읽고 씁니다. 출력 폴더는 불러온 뒤 알림의 «출력 폴더도 적용»을 눌러야 바뀝니다.
 
-팩 설정 대화상자의 **Load / Save** 는 Spine 이 쓰는 `pack.json` 을 그대로 읽고 씁니다. 출력 형식은 PNG 만 되고, *Auto scale* 은 지원하지 않습니다. *Legacy output* 을 켜면 3.8 이하 런타임이 읽는 옛 atlas 형식으로 씁니다(런타임 버전을 3.8 로 고르면 Spine 처럼 꺼져 있어도 옛 형식으로 씁니다). 메시만 쓰는 이미지는 패킹 방식과 상관없이 Spine 처럼 메시 UV 범위로 자릅니다. *Packing: Polygons* 는 메시만 쓰는 이미지를 메시가 덮는 모양대로 묶습니다(영역 첨부가 쓰는 이미지는 사각형 그대로이고, 페이지 안 배치는 Spine 과 다릅니다). Spine 처럼 다각형 모양은 사각형보다 1픽셀 가깝게 놓습니다(여백 2 면 모양 사이 빈 픽셀이 1줄 이상). *Combine subdirectories* 는 «이미지 폴더»로 묶을 때만 씁니다(폴더 안 `pack.json` 은 읽지 않습니다). *Format* 은 atlas 의 `format:` 줄만 바꾸고 PNG 는 RGBA 로 저장합니다.
+팩 설정 대화상자의 **Load / Save** 는 Spine 이 쓰는 `pack.json` 을 그대로 읽고 씁니다. 출력 형식은 PNG 만 되고, *Auto scale* 은 지원하지 않습니다. *Scale* 의 배율마다 고르는 *Resampling*(Auto · Nearest · Bilinear · Bilinear progressive · Bicubic)은 Spine 과 픽셀 단위로 같은 결과를 냅니다(Spine 4.2 명령줄 패커와 대조). Spine 처럼 Auto 는 Bicubic(넓이 평균)과, Bilinear progressive 는 Bilinear 와 결과가 같습니다. 줄인 크기의 한 변이 0 으로 반올림될 때는 Spine 과 달리 1픽셀로 둡니다(Spine 은 비우거나 오류로 멈춥니다). *Legacy output* 을 켜면 3.8 이하 런타임이 읽는 옛 atlas 형식으로 씁니다(런타임 버전을 3.8 로 고르면 Spine 처럼 꺼져 있어도 옛 형식으로 씁니다). 메시만 쓰는 이미지는 패킹 방식과 상관없이 Spine 처럼 메시 UV 범위로 자릅니다. *Packing: Polygons* 는 메시만 쓰는 이미지를 메시가 덮는 모양대로 묶습니다(영역 첨부가 쓰는 이미지는 사각형 그대로이고, 페이지 안 배치는 Spine 과 다릅니다). Spine 처럼 다각형 모양은 사각형보다 1픽셀 가깝게 놓습니다(여백 2 면 모양 사이 빈 픽셀이 1줄 이상). *Combine subdirectories* 는 «이미지 폴더»로 묶을 때만 씁니다(폴더 안 `pack.json` 은 읽지 않습니다). *Format* 은 atlas 의 `format:` 줄만 바꾸고 PNG 는 RGBA 로 저장합니다.
 
 ## 구조
 

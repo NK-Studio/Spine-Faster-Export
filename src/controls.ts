@@ -13,7 +13,8 @@ const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&
  */
 export function selectHtml(
   attrs: string,
-  items: [value: string, label: string, disabled?: boolean][],
+  /** short: 버튼에만 보일 짧은 이름(좁은 칸용). 펼친 목록에는 label 이 보인다. */
+  items: [value: string, label: string, disabled?: boolean, short?: string][],
   current: string,
   enabled = true,
   tip = "",
@@ -21,9 +22,10 @@ export function selectHtml(
 ): string {
   // WKWebView 는 <select> 를 누르면 OS 메뉴를 띄운다(mousedown 을 막아도). 그래서 보이는 것은 자체 버튼이고,
   // 값과 change 이벤트는 숨긴 <select> 가 맡는다(기존 처리 코드는 select 를 그대로 쓴다).
-  const label = items.find(([v]) => v === current)?.[1] ?? items[0]?.[1] ?? "";
+  const it = items.find(([v]) => v === current) ?? items[0];
+  const label = it ? (it[3] ?? it[1]) : "";
   return `<span class="select${enabled ? "" : " disabled"}"${tip ? ` title="${esc(tip)}"` : ""}><select class="field" hidden tabindex="-1" aria-hidden="true" ${attrs} ${enabled ? "" : "disabled"}>${items
-    .map(([v, l, d]) => `<option value="${esc(v)}" ${v === current ? "selected" : ""} ${d ? "disabled" : ""} ${v === def ? 'data-default=""' : ""}>${esc(l)}</option>`)
+    .map(([v, l, d, sh]) => `<option value="${esc(v)}" ${v === current ? "selected" : ""} ${d ? "disabled" : ""} ${v === def ? 'data-default=""' : ""}${sh ? ` data-short="${esc(sh)}"` : ""}>${esc(l)}</option>`)
     .join("")}</select><button type="button" class="field select-btn" aria-haspopup="listbox" aria-expanded="false" ${enabled ? "" : "disabled"}><span class="v">${esc(label)}</span></button></span>`;
 }
 
@@ -123,7 +125,7 @@ function showList(sel: HTMLSelectElement) {
     if (changed) {
       sel.selectedIndex = i;
       const v = btn.querySelector(".v");
-      if (v) v.textContent = opts[i].textContent ?? "";
+      if (v) v.textContent = opts[i].dataset.short ?? opts[i].textContent ?? "";
       sel.dispatchEvent(new Event("change", { bubbles: true }));
     }
   };

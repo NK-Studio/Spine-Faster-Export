@@ -45,6 +45,8 @@ export interface PackSettings {
   bleedIterations: number;
   scale: number[];
   scaleSuffix: string[];
+  /** 배율별 리샘플링 방식(Spine 이름). 모자라면 bicubic. */
+  scaleResampling: string[];
   atlasExtension: string;
   combineSubdirectories: boolean;
   flattenPaths: boolean;
@@ -60,6 +62,16 @@ export interface PackSettings {
 const FILTERS: Filter[] = ["Nearest", "Linear", "MipMap", "MipMapNearestNearest", "MipMapLinearNearest", "MipMapNearestLinear", "MipMapLinearLinear"];
 const WRAPS: Wrap[] = ["ClampToEdge", "Repeat", "MirroredRepeat"];
 const FORMATS: PixelFormat[] = ["Alpha", "Intensity", "LuminanceAlpha", "RGB565", "RGBA4444", "RGB888", "RGBA8888"];
+/** 배율 리샘플링(Spine 의 Resampling). Spine 에서 auto 는 bicubic 과, bilinearProgressive 는 bilinear 와 결과가 같다. */
+/** [값, 목록에 보일 이름, , 좁은 버튼에 보일 이름] */
+const RESAMPLINGS: [string, string, boolean, string][] = [
+  ["auto", "Auto", false, "Auto"],
+  ["nearest", "Nearest", false, "NN"],
+  ["bilinear", "Bilinear", false, "BL"],
+  ["bilinearProgressive", "Bilinear progressive", false, "BL+"],
+  ["bicubic", "Bicubic", false, "BC"],
+];
+const DEFAULT_RESAMPLING = "bicubic";
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 
@@ -79,7 +91,14 @@ export function packSummary(p: PackSettings, unity = false): string {
   if (p.grid) parts.push(t("그리드"));
   else if (p.packing === "polygons") parts.push(t("다각형"));
   const scales = p.scale.filter((s) => s > 0);
-  if (scales.length > 1 || (scales.length === 1 && scales[0] !== 1)) parts.push(t("배율 {s}", { s: scales.join(", ") }));
+  if (scales.length > 1 || (scales.length === 1 && scales[0] !== 1)) {
+    parts.push(t("배율 {s}", { s: scales.join(", ") }));
+    const names = p.scale
+      .map((v, i) => [v, p.scaleResampling?.[i] ?? DEFAULT_RESAMPLING] as const)
+      .filter(([v, m]) => v > 0 && v !== 1 && m !== "bicubic" && m !== "auto")
+      .map(([, m]) => RESAMPLINGS.find(([k]) => k === m)?.[1] ?? m);
+    if (names.length) parts.push(t("리샘플링 {m}", { m: [...new Set(names)].join(", ") }));
+  }
   parts.push(p.atlasExtension + (unity ? " (Unity)" : ""));
   return parts.join(" · ");
 }
@@ -88,6 +107,8 @@ export interface PackerResult {
   pack: PackSettings;
   unity: boolean;
 }
+
+const RESAMPLE_TIP = t("배율을 적용할 때 쓰는 방법. Auto · Bicubic: 넓이 평균(부드러움) · Bilinear: 선형 보간 · Nearest: 가장 가까운 픽셀(도트 그림). Spine 에서 Auto 는 Bicubic 과, Bilinear progressive 는 Bilinear 와 결과가 같습니다");
 
 interface SliderSpec {
   key: "alphaThreshold" | "paddingX" | "paddingY" | "minWidth" | "minHeight" | "maxWidth" | "maxHeight";
@@ -209,6 +230,8 @@ export function openPackerDialog(
             ${scales.map((v, i) => `<input type="text" inputmode="decimal" class="field mono${v ? "" : " empty"}" data-scale="${i}" placeholder="${i === 0 ? "1" : ""}" spellcheck="false" value="${v ?? ""}" />`).join("")}
             <span class="lbl" title="${t("배율별 파일 이름 접미사(예: @2x)")}">${t("접미사")}:</span>
             ${[0, 1, 2, 3, 4].map((i) => `<input type="text" class="field mono${s.scaleSuffix[i] ? "" : " empty"}" data-suffix="${i}" placeholder="${i === 0 ? "" : ["", "@2x", "@0.5x", "@3x", "@4x"][i]}" spellcheck="false" value="${esc(s.scaleSuffix[i] ?? "")}" />`).join("")}
+            <span class="lbl" title="${esc(RESAMPLE_TIP)}">${t("리샘플링")}:</span>
+            ${[0, 1, 2, 3, 4].map((i) => selectHtml(`data-resample="${i}"`, RESAMPLINGS, s.scaleResampling[i] ?? DEFAULT_RESAMPLING, i === 0 || (scales[i] ?? 0) > 0, RESAMPLE_TIP, DEFAULT_RESAMPLING)).join("")}
           </div>
         </section>
 
@@ -298,6 +321,9 @@ export function openPackerDialog(
             el.value = scales[i] ? String(scales[i]) : "";
             el.classList.toggle("empty", !scales[i]);
             compactScales(scales, [0, 1, 2, 3, 4].map((k) => s.scaleSuffix[k] ?? ""));
+            // 배율이 생기거나 없어진 칸은 리샘플링 선택을 켜고 끈다
+            const pick = body.querySelector<HTMLElement>(`select[data-resample="${i}"]`)?.closest(".select");
+            if (pick && i > 0 && pick.classList.contains("disabled") === scales[i] > 0) render();
             showErrors();
           }),
       );
@@ -311,6 +337,14 @@ export function openPackerDialog(
             showErrors();
           }),
       );
+      body.querySelectorAll<HTMLSelectElement>("select[data-resample]").forEach(
+        (el) =>
+          (el.onchange = () => {
+            const methods = [0, 1, 2, 3, 4].map((k) => s.scaleResampling[k] ?? DEFAULT_RESAMPLING);
+            methods[Number(el.dataset.resample)] = el.value;
+            s.scaleResampling = methods.slice(0, Math.max(1, s.scale.length));
+          }),
+      );
     }
 
     // 칸 자리를 그대로 두되, 저장할 때는 배율이 있는 칸까지만.
@@ -319,6 +353,7 @@ export function openPackerDialog(
       while (n > 0 && !(scales[n - 1] > 0) && !suffixes[n - 1]) n--;
       s.scale = scales.slice(0, n);
       s.scaleSuffix = suffixes.slice(0, n);
+      s.scaleResampling = [0, 1, 2, 3, 4].map((k) => s.scaleResampling[k] ?? DEFAULT_RESAMPLING).slice(0, Math.max(1, n));
     }
 
     /** 칸별 오류. */
@@ -364,8 +399,8 @@ export function openPackerDialog(
       const err = validate();
       if (err) return toast("error", t("팩 설정을 확인하세요"), err);
       // 빈 배율 칸은 빼고 저장
-      const pairs = s.scale.map((v, i) => [v, s.scaleSuffix[i] ?? ""] as const).filter(([v]) => v > 0);
-      close({ pack: { ...s, scale: pairs.map(([v]) => v), scaleSuffix: pairs.map(([, x]) => x) }, unity });
+      const kept = s.scale.map((v, i) => [v, s.scaleSuffix[i] ?? "", s.scaleResampling[i] ?? DEFAULT_RESAMPLING] as const).filter(([v]) => v > 0);
+      close({ pack: { ...s, scale: kept.map(([v]) => v), scaleSuffix: kept.map(([, x]) => x), scaleResampling: kept.map(([, , m]) => m) }, unity });
     };
 
     back.querySelector<HTMLElement>('[data-act="ok"]')!.onclick = ok;
