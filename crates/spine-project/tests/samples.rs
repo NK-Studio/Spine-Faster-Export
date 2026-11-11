@@ -43,6 +43,12 @@ fn load_all_samples() {
                     let m = p.read_model(i).unwrap_or_else(|e| panic!("{}: 모델 {i}: {e}", f.display()));
                     assert!(!m.bones.is_empty(), "{}: 뼈가 없습니다", f.display());
                 }
+                // 저장된 내보내기 설정은 JSON · 바이너리 설정 모양이어야 한다
+                if let Some(s) = p.last_export_settings() {
+                    let class = s["class"].as_str().unwrap_or("");
+                    assert!(class == "export-json" || class == "export-binary", "{}: 내보내기 설정 class {class}", f.display());
+                    assert!(s["extension"].is_string(), "{}: 내보내기 설정에 확장자가 없습니다", f.display());
+                }
                 loaded += 1;
                 eprintln!("{:>8.2} ms  {}  {}", t.elapsed().as_secs_f64() * 1000.0, p.format_version(), f.display());
             }

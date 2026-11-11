@@ -6,6 +6,7 @@
 //! - [`SpineProject::format_version`]
 //! - [`SpineProject::skeleton_names`]
 //! - [`SpineProject::read_model`]
+//! - [`SpineProject::last_export_settings`]
 //!
 //! 모듈:
 //! - `container`: raw deflate 컨테이너(+ 4.3.17 꼬리)
@@ -13,9 +14,11 @@
 //! - `document`: Kryo 객체 그래프 읽기와 «다시 쓰기 = 원본» 확인
 //! - `view`: 태그 번호로 필드 찾기, 잎 값 꺼내기
 //! - `reader`: 그래프 → [`SkeletonModel`]
+//! - `export_settings`: 프로젝트에 저장된 내보내기 설정 → Spine 설정 JSON
 
 mod container;
 mod document;
+mod export_settings;
 mod reader;
 mod schema;
 mod view;
@@ -69,6 +72,13 @@ impl SpineProject {
 
     /// [`read_model`](Self::read_model) 과 같고, export_all 이면 Export 체크가 꺼진 첨부도 넣는다(Spine «Export all»).
     pub fn read_model_with(&self, index: usize, export_all: bool) -> SpineResult<SkeletonModel> {
+        self.read_model_for(index, export_all, None)
+    }
+
+    /// [`read_model_with`](Self::read_model_with) 와 같고, 내보낼 Spine 버전(예: "4.2.43")을 알려 준다.
+    /// 가중치 메시의 삼각형 순서가 내보내는 편집기 버전에 따라 달라서 필요하다: 4.2 이하 편집기는 프로젝트를 열며
+    /// 삼각형을 정렬하고, 4.3 은 저장된 순서 그대로 쓴다. 버전을 주지 않으면 프로젝트를 저장한 버전의 편집기로 본다.
+    pub fn read_model_for(&self, index: usize, export_all: bool, target_version: Option<&str>) -> SpineResult<SkeletonModel> {
         let Some(&(_, sk)) = self.skeletons.get(index) else {
             return Err(SpineError::Usage(format!(
                 "스켈레톤 번호 {index}가 범위를 벗어났습니다(스켈레톤 {}개)",
@@ -76,7 +86,14 @@ impl SpineProject {
             )));
         };
         let view = View { doc: &self.doc, body: &self.body, format: &self.version };
-        match catch_unwind(AssertUnwindSafe(|| reader::Reader::new(&view).export_all(export_all).read(sk))) {
+        let read = || {
+            let mut reader = reader::Reader::new(&view).export_all(export_all);
+            if let Some(v) = target_version {
+                reader = reader.target_version(v);
+            }
+            reader.read(sk)
+        };
+        match catch_unwind(AssertUnwindSafe(read)) {
             Ok(result) => result,
             Err(_) => Err(view::broken("내부 오류")),
         }
@@ -85,6 +102,14 @@ impl SpineProject {
     /// 내보내기용 부분 읽기에서 멈춘 이유(끝까지 읽었으면 None).
     pub fn partial_error(&self) -> Option<&str> {
         self.doc.partial_error.as_deref()
+    }
+
+    /// 프로젝트에 저장된 마지막 데이터 내보내기 설정(Spine Export 대화상자의 값).
+    /// Spine CLI `--last-export-settings` 와 같은 모양의 JSON(`"class": "export-json" | "export-binary"`).
+    /// 저장된 설정이 없거나(내보낸 적 없음) 그 부분을 읽지 못했으면 None.
+    pub fn last_export_settings(&self) -> Option<serde_json::Value> {
+        let view = View { doc: &self.doc, body: &self.body, format: &self.version };
+        catch_unwind(AssertUnwindSafe(|| export_settings::last(&view))).ok().flatten()
     }
 
     /// 고른 스키마 이름(진단용).

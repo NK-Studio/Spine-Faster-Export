@@ -1,6 +1,8 @@
 //! 모델 → Spine 바이너리(.skel). 파이썬 `binary_writer.Writer` 포팅.
 //!
 //! 런타임(spine-runtimes)의 SkeletonBinary 가 읽는 순서 그대로 쓴다. 버전마다 다른 부분은 `major` 로 가른다.
+//! 3.8 은 설정 자세 부분이 4.0 과 거의 같고(해시가 문자열, 변형·경로 제약의 mix 개수가 다르다),
+//! 애니메이션은 형식이 달라 따로 쓴다([`Writer::animation38`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -11,7 +13,7 @@ use spine_model::{
 
 use crate::out::Out;
 use crate::util::{
-    curve_str, f32r, hds, legacy_properties, nat_cmp, round_half_up, same_key_stepped, vals, UNSET,
+    byte255, curve_str, f32r, hds, legacy_properties, nat_cmp, round_half_up, same_key_stepped, vals, UNSET,
 };
 
 const INHERIT: [&str; 5] = [
@@ -46,6 +48,19 @@ fn att_type_code(t: &str) -> Option<i64> {
 
 fn err(msg: String) -> SpineError {
     SpineError::Format(msg)
+}
+
+/// 20바이트를 base64 로 적은 27자(채움 글자 없음) — 3.8 의 해시 문자열 모양.
+fn base64_27(bytes: &[u8; 20]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(28);
+    for chunk in bytes.chunks(3) {
+        let n = (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8 | *chunk.get(2).unwrap_or(&0) as u32;
+        for i in 0..=chunk.len() {
+            out.push(T[(n >> (18 - 6 * i)) as usize & 63] as char);
+        }
+    }
+    out
 }
 
 fn s(x: &Option<String>) -> &str {
@@ -280,6 +295,10 @@ impl<'a> Writer<'a> {
         self.major >= (4, 2)
     }
 
+    fn v38(&self) -> bool {
+        self.major < (4, 0)
+    }
+
     fn v43(&self) -> bool {
         self.major >= (4, 3)
     }
@@ -287,7 +306,10 @@ impl<'a> Writer<'a> {
     // ------------------------------------------------------------ 시간·문자열
 
     fn sec(&self, frame: f64) -> f64 {
-        if self.v43() {
+        if self.v38() {
+            // 3.8: 프레임 ÷ fps 를 배정밀도로 계산해 float 로
+            f32r(frame / self.fps)
+        } else if self.v43() {
             f32r(f32r(frame) / f32r(self.fps))
         } else {
             f32r(f32r(frame) * f32r(1.0 / self.fps))
@@ -334,7 +356,9 @@ impl<'a> Writer<'a> {
 
     pub fn build(mut self) -> SpineResult<Vec<u8>> {
         let m = self.m;
-        self.o.b.extend_from_slice(&[0u8; 8]); // 해시: 본문을 다 쓴 뒤 채운다
+        if !self.v38() {
+            self.o.b.extend_from_slice(&[0u8; 8]); // 해시: 본문을 다 쓴 뒤 채운다
+        }
         self.o.string(Some(self.version));
         let bounds = m.bounds.as_deref().unwrap_or(&[]);
         for i in 0..4 {
@@ -387,6 +411,10 @@ impl<'a> Writer<'a> {
         self.o.varint(m.animations.len() as i64);
         for an in &m.animations {
             self.o.string(an.name.as_deref());
+            if self.v38() {
+                self.animation38(&an.timelines)?;
+                continue;
+            }
             self.animation(&an.timelines)?;
             if self.nonessential && self.v43() {
                 let c = color_int(&an.color)?;
@@ -412,6 +440,14 @@ impl<'a> Writer<'a> {
                     self.o.varint(i as i64);
                 }
             }
+        }
+        if self.v38() {
+            // 3.8: 해시는 맨 앞의 문자열(base64 27자). 편집기의 계산법은 알 수 없어 본문의 SHA-1 을 쓴다(런타임은 비교에만 쓴다).
+            let digest = sha1_smol::Sha1::from(&self.o.b).digest().bytes();
+            let mut head = Out::default();
+            head.string(Some(&base64_27(&digest)));
+            head.b.extend_from_slice(&self.o.b);
+            return Ok(head.b);
         }
         let digest = sha1_smol::Sha1::from(&self.o.b[8..]).digest().bytes();
         self.o.b[..8].copy_from_slice(&digest[..8]);
@@ -554,6 +590,13 @@ impl<'a> Writer<'a> {
                 for v in [c.rotation, c.x, c.y, c.scale_x, c.scale_y, c.shear_y] {
                     self.o.float(v);
                 }
+                if self.v38() {
+                    // 3.8: 회전 · 이동 · 크기 · 기울임 mix 넷(축마다 따로가 아니다)
+                    for v in [c.mixes[0], c.mixes[1], c.mixes[3], c.mixes[5]] {
+                        self.o.float(v);
+                    }
+                    continue;
+                }
                 for v in c.mixes {
                     self.o.float(v);
                 }
@@ -640,6 +683,13 @@ impl<'a> Writer<'a> {
             if flags & 128 != 0 {
                 self.o.float(c.rotation);
             }
+        }
+        if self.v38() {
+            // 3.8: 회전 · 이동 mix 둘
+            for v in [c.position, c.spacing, c.mixes[0], c.mixes[1]] {
+                self.o.float(v);
+            }
+            return Ok(());
         }
         for v in [c.position, c.spacing, c.mixes[0], c.mixes[1], c.mixes[2]] {
             self.o.float(v);
@@ -1080,6 +1130,15 @@ impl<'a> Writer<'a> {
         }
     }
 
+    /// 3.8 편집기는 정점 좌표를 소수 둘째 자리로 반올림해 쓴다(4.x 는 그대로).
+    fn vertex_xy(&self, v: f64) -> f64 {
+        if self.v38() {
+            round_half_up(v, 2)
+        } else {
+            v
+        }
+    }
+
     /// 가중치 정점: [뼈 수, (뼈 번호, x, y, 가중치)×뼈 수]×정점.
     fn weighted_body(&mut self, v: &[f64]) {
         let mut i = 0;
@@ -1093,8 +1152,8 @@ impl<'a> Writer<'a> {
                     return;
                 }
                 self.o.varint(v[i] as i64);
-                self.o.float(v[i + 1]);
-                self.o.float(v[i + 2]);
+                self.o.float(self.vertex_xy(v[i + 1]));
+                self.o.float(self.vertex_xy(v[i + 2]));
                 self.o.float(round_half_up(v[i + 3], 5)); // 가중치는 5자리로 반올림된 값이 저장된다
                 i += 4;
             }
@@ -1106,7 +1165,7 @@ impl<'a> Writer<'a> {
         let v = a.vertices.as_deref().unwrap_or(&[]);
         if !a.weighted {
             for x in v {
-                self.o.float(*x);
+                self.o.float(self.vertex_xy(*x));
             }
             return Ok(());
         }
@@ -1593,6 +1652,275 @@ impl<'a> Writer<'a> {
         self.o.varint(events.len() as i64);
         for k in events {
             self.event_key(k)?;
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------ 3.8 애니메이션
+
+    /// 3.8 의 k → 다음 키 곡선: 0 직선 · 1 계단 · 2 베지어(정규화된 c1 c2 c3 c4).
+    /// 3.8 프로젝트는 키에 적힌 곡선을 그대로, 4.x 프로젝트의 베지어는 Spine 의 3.8 내보내기처럼 직선으로 낸다.
+    /// 값이 같은 두 키 사이는 4.x 와 마찬가지로 계단으로 낸다.
+    fn curve38(&mut self, keys: &[ModelKey], i: usize, nch: usize) {
+        let (k, nxt) = (&keys[i], &keys[i + 1]);
+        let cv = curve_str(k);
+        let same_dense = match (&k.dense, &nxt.dense) {
+            (Some(a), Some(b)) => cv == "linear" && a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 0.0001),
+            _ => false,
+        };
+        // 3.8 프로젝트의 회전 키는 저장된 각도로 비교한다: -297.81 과 62.19 는 이어 붙이면 같은 값이지만 3.8 에서는 다른 키다
+        let turned = matches!((k.angle38, nxt.angle38), (Some(a), Some(b)) if (a - b).abs() > 1e-6);
+        if cv == "stepped" || (!turned && same_key_stepped(k, nxt, nch)) || same_dense {
+            self.o.byte(CURVE_STEPPED);
+        } else if let Some(c) = k.curve38.filter(|c| *c != [0.0, 0.0, 1.0, 1.0]) {
+            // (0, 0, 1, 1) 은 직선과 같아 편집기도 직선으로 쓴다
+            self.o.byte(CURVE_BEZIER);
+            for v in c {
+                self.o.float(v);
+            }
+        } else {
+            self.o.byte(CURVE_LINEAR);
+        }
+    }
+
+    /// 키마다 `시간, 값들` 을 쓰고 마지막 키가 아니면 곡선을 붙인다(3.8 의 공통 모양). nch 는 값 채널 수.
+    fn keys38(&mut self, keys: &[ModelKey], nch: usize, mut values: impl FnMut(&mut Self, &ModelKey) -> SpineResult<()>) -> SpineResult<()> {
+        for (i, k) in keys.iter().enumerate() {
+            self.o.float(self.sec(k.frame));
+            values(self, k)?;
+            if i + 1 < keys.len() {
+                self.curve38(keys, i, nch);
+            }
+        }
+        Ok(())
+    }
+
+    fn animation38(&mut self, tls: &'a [ModelTimeline]) -> SpineResult<()> {
+        let mut slots: Ordered<Vec<&ModelTimeline>> = Ordered::new();
+        let mut bones: Ordered<Vec<&ModelTimeline>> = Ordered::new();
+        let mut iks: Ordered<&ModelTimeline> = Ordered::new();
+        let mut trs: Ordered<&ModelTimeline> = Ordered::new();
+        let mut paths: Ordered<Vec<&ModelTimeline>> = Ordered::new();
+        let mut deforms: Ordered<Ordered<Vec<&ModelTimeline>>> = Ordered::new();
+        let mut events: Vec<&ModelKey> = Vec::new();
+        let mut draw: &[ModelKey] = &[];
+        for t in tls {
+            match t.type_str() {
+                "color" | "attachment" => slots.entry(s(&t.slot), Vec::new).push(t),
+                "rotate" | "translate" | "scale" | "shear" => bones.entry(s(&t.bone), Vec::new).push(t),
+                "ik" => iks.set(s(&t.constraint), t),
+                "transform" => trs.set(s(&t.constraint), t),
+                "pathPosition" | "pathSpacing" | "pathMix" => paths.entry(s(&t.constraint), Vec::new).push(t),
+                "deform" => deforms.entry(s(&t.skin), Ordered::new).entry(s(&t.slot), Vec::new).push(t),
+                "event" => events.extend(t.keys.iter()),
+                "drawOrder" => draw = &t.keys,
+                other => return Err(SpineError::Unsupported(format!("3.8 바이너리에 쓸 수 없는 타임라인: {other}"))),
+            }
+        }
+        events.sort_by(|a, b| a.frame.partial_cmp(&b.frame).unwrap_or(std::cmp::Ordering::Equal));
+
+        // 슬롯
+        self.o.varint(slots.len() as i64);
+        let mut sl = slots.items;
+        sl.sort_by(|a, b| nat_cmp(&a.0, &b.0));
+        for (slot, ts) in sl {
+            let i = self.slot(&slot)?;
+            self.o.varint(i);
+            self.o.varint(ts.len() as i64);
+            let two = self.m.slots.iter().find(|x| s(&x.name) == slot).is_some_and(|x| x.dark.is_some());
+            for t in ts {
+                if t.type_str() == "attachment" {
+                    self.o.byte(0);
+                    self.o.varint(t.keys.len() as i64);
+                    for k in &t.keys {
+                        self.o.float(self.sec(k.frame));
+                        self.rf(k.name.as_deref())?;
+                    }
+                    continue;
+                }
+                self.o.byte(if two { 2 } else { 1 });
+                self.o.varint(t.keys.len() as i64);
+                self.keys38(&t.keys, if two { 7 } else { 4 }, |w, k| {
+                    let v = vals(k);
+                    let b = |c: usize| byte255(v.get(c).copied().unwrap_or(0.0)) & 0xFF;
+                    w.o.int((b(0) << 24) | (b(1) << 16) | (b(2) << 8) | b(3));
+                    if two {
+                        w.o.int((b(4) << 16) | (b(5) << 8) | b(6)); // 어두운 색은 RGB 만(위 바이트 0)
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+        // 뼈
+        self.o.varint(bones.len() as i64);
+        for (bone, ts) in bones.items {
+            let i = self.bone(&bone)?;
+            self.o.varint(i);
+            self.o.varint(ts.len() as i64);
+            for t in ts {
+                let rotate = t.type_str() == "rotate";
+                self.o.byte(match t.type_str() {
+                    "rotate" => 0,
+                    "translate" => 1,
+                    "scale" => 2,
+                    _ => 3,
+                });
+                self.o.varint(t.keys.len() as i64);
+                self.keys38(&t.keys, if rotate { 1 } else { 2 }, |w, k| {
+                    let v = vals(k);
+                    if rotate {
+                        w.o.float(k.angle38.unwrap_or_else(|| v.first().copied().unwrap_or(0.0)));
+                    } else {
+                        w.o.float(v.first().copied().unwrap_or(0.0));
+                        w.o.float(v.get(1).copied().unwrap_or(0.0));
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+        // IK: 시간, mix, softness, 굽힘 방향, compress, stretch
+        self.o.varint(iks.len() as i64);
+        let mut ik = Vec::new();
+        for (n, t) in iks.items {
+            ik.push((lookup(&self.ik_index, &n, "IK 제약")?, t));
+        }
+        ik.sort_by_key(|x| x.0);
+        for (i, t) in ik {
+            self.o.varint(i as i64);
+            self.o.varint(t.keys.len() as i64);
+            self.keys38(&t.keys, 2, |w, k| {
+                let v = vals(k);
+                let g = |i: usize| v.get(i).copied().unwrap_or(0.0);
+                let (mix, soft, stretch, compress, bend) = (g(0), g(1), g(2), g(3), g(4));
+                w.o.float(mix);
+                w.o.float(soft);
+                w.o.byte(if bend != 0.0 { 1 } else { 0xFF });
+                w.o.boolean(compress != 0.0);
+                w.o.boolean(stretch != 0.0);
+                Ok(())
+            })?;
+        }
+        // 변형 제약: 회전 · 이동 · 크기 · 기울임 mix
+        self.o.varint(trs.len() as i64);
+        let mut tr = Vec::new();
+        for (n, t) in trs.items {
+            tr.push((lookup(&self.tr_index, &n, "변형 제약")?, t));
+        }
+        tr.sort_by_key(|x| x.0);
+        for (i, t) in tr {
+            self.o.varint(i as i64);
+            self.o.varint(t.keys.len() as i64);
+            self.keys38(&t.keys, 6, |w, k| {
+                let v = vals(k);
+                for c in [0, 1, 3, 5] {
+                    w.o.float(v.get(c).copied().unwrap_or(0.0));
+                }
+                Ok(())
+            })?;
+        }
+        // 경로 제약
+        self.o.varint(paths.len() as i64);
+        let mut pa = Vec::new();
+        for (n, ts) in paths.items {
+            pa.push((lookup(&self.path_index, &n, "경로 제약")?, ts));
+        }
+        pa.sort_by_key(|x| x.0);
+        for (i, ts) in pa {
+            self.o.varint(i as i64);
+            self.o.varint(ts.len() as i64);
+            for t in ts {
+                let (code, n) = match t.type_str() {
+                    "pathPosition" => (0, 1),
+                    "pathSpacing" => (1, 1),
+                    _ => (2, 2),
+                };
+                self.o.byte(code);
+                self.o.varint(t.keys.len() as i64);
+                self.keys38(&t.keys, if n == 1 { 1 } else { 3 }, |w, k| {
+                    let v = vals(k);
+                    for c in 0..n {
+                        w.o.float(v.get(c).copied().unwrap_or(0.0));
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+        // 변형(deform)
+        self.o.varint(deforms.len() as i64);
+        let mut de = Vec::new();
+        for (skin, slots) in deforms.items {
+            let i = self.skins.iter().position(|x| s(&x.name) == skin).ok_or_else(|| err(format!("스킨을 찾을 수 없습니다: {skin}")))?;
+            de.push((i, slots));
+        }
+        de.sort_by_key(|x| x.0);
+        for (i, slots) in de {
+            self.o.varint(i as i64);
+            self.o.varint(slots.len() as i64);
+            let mut ss = slots.items;
+            ss.sort_by(|a, b| nat_cmp(&a.0, &b.0));
+            for (slot, ts) in ss {
+                let si = self.slot(&slot)?;
+                self.o.varint(si);
+                self.o.varint(ts.len() as i64);
+                for t in ts {
+                    let att = self.find_att(t)?;
+                    let map = att.dense_map.as_deref().unwrap_or(&[]);
+                    self.rf(t.attachment.as_deref())?;
+                    self.o.varint(t.keys.len() as i64);
+                    self.keys38(&t.keys, 1, |w, k| {
+                        let dense = k.dense.as_deref().unwrap_or(&[]);
+                        let vec: Vec<f64> = map.iter().map(|&j| if j >= 0 && (j as usize) < dense.len() { dense[j as usize] } else { 0.0 }).collect();
+                        match vec.iter().position(|x| *x != 0.0) {
+                            None => w.o.varint(0),
+                            Some(start) => {
+                                let end = vec.iter().rposition(|x| *x != 0.0).unwrap() + 1;
+                                w.o.varint((end - start) as i64);
+                                w.o.varint(start as i64);
+                                for v in &vec[start..end] {
+                                    w.o.float(*v);
+                                }
+                            }
+                        }
+                        Ok(())
+                    })?;
+                }
+            }
+        }
+        // 그리기 순서
+        self.o.varint(draw.len() as i64);
+        for k in draw {
+            self.o.float(self.sec(k.frame));
+            let mut changed = Vec::new();
+            for (slot, off) in k.offsets.as_deref().unwrap_or(&[]) {
+                changed.push((self.slot(slot)?, *off));
+            }
+            changed.sort_by_key(|x| x.0);
+            self.o.varint(changed.len() as i64);
+            for (i, off) in changed {
+                self.o.varint(i);
+                self.o.varint(off);
+            }
+        }
+        // 이벤트
+        self.o.varint(events.len() as i64);
+        for k in events {
+            let e = k.event.as_ref().ok_or_else(|| err("이벤트 키에 이벤트가 없습니다".to_string()))?;
+            let data = self.m.events.iter().find(|d| d.name == e.name).ok_or_else(|| err(format!("이벤트 정의를 찾을 수 없습니다: {}", s(&e.name))))?;
+            self.o.float(self.sec(k.frame));
+            let i = lookup(&self.event_index, s(&e.name), "이벤트")?;
+            self.o.varint(i as i64);
+            self.o.svarint(e.int);
+            self.o.float(e.float);
+            // 3.8: 문자열이 정의와 다를 때만 싣는다(있음 여부를 먼저 쓴다)
+            let st = e.string.as_deref().filter(|x| *x != s(&data.string));
+            self.o.boolean(st.is_some());
+            if let Some(st) = st {
+                self.o.string(Some(st));
+            }
+            if !s(&data.audio).is_empty() {
+                self.o.float(e.volume);
+                self.o.float(e.balance);
+            }
         }
         Ok(())
     }

@@ -1,4 +1,4 @@
-# Spine Faster Export
+# Quick Spine
 
 Spine 프로그램 없이 `.spine` 프로젝트에서 고른 스켈레톤만 런타임 파일(JSON · `.skel` · atlas)로 내보내는 데스크톱 앱입니다. Tauri 2 + Rust.
 
@@ -8,20 +8,22 @@ Spine 프로그램 없이 `.spine` 프로젝트에서 고른 스켈레톤만 런
 ## 쓰는 법
 
 1. `.spine` 파일을 창에 끌어 놓거나, **열기**(⌘O / Ctrl+O), 또는 파인더·탐색기에서 «다음으로 열기».
+   - 프로젝트에 Spine 에서 마지막으로 쓴 JSON·바이너리 내보내기 설정이 저장돼 있고 지금 설정과 다르면 «내보내기 설정을 가져올까요?» 를 묻습니다. **예**를 누르면 그 설정과 출력 폴더를 함께 적용합니다.
 2. 왼쪽 목록에서 내보낼 스켈레톤을 체크합니다(처음엔 모두 켜짐). 줄 선택과 체크는 따로입니다.
    - 줄 고르기: 클릭 · `⌘/Ctrl+클릭` 더하기 · `Shift+클릭`·`Shift+↑↓` 범위 · 끌어서 범위 · `⌘/Ctrl+A` 모두 · `Esc` 한 줄로
    - 체크: `Space` 또는 목록 아래 [체크]/[해제] 로 고른 줄을 한꺼번에(하나라도 꺼져 있으면 모두 켬). 고른 줄의 체크 상자를 눌러도 고른 줄 모두가 바뀝니다.
 3. 오른쪽에서 버전·형식을 고르고, 텍스처 아틀라스는 **팩 설정…** 에서 Spine 의 *Texture Packer Settings* 와 같은 항목으로 정합니다. 그다음 **내보내기**(⌘E / Ctrl+E). 스켈레톤마다 병렬로 처리합니다.
+   - **런타임 버전**은 4.0 ~ 4.3 과 3.8 을 고를 수 있습니다. 3.8 도 JSON 과 바이너리(`.skel`) 모두 됩니다(3.8 바이너리는 Spine 3.8.99 가 내보낸 파일과 바이트 단위로 대조했습니다). 3.8 로 내보낼 때는 프로젝트 버전과 상관없이 Spine 3.8 처럼 atlas 를 늘 스켈레톤별로 만듭니다(«싱글 아틀라스» 선택이 보이지 않습니다). Spine 의 3.8 내보내기와 같게 4.x 프로젝트의 베지어 곡선은 직선으로 바꾸고(계단은 그대로), 4.3 프로젝트는 숫자를 4.3 식으로 씁니다. 3.8 프로젝트는 곡선을 그대로 둡니다(Spine 3.8 편집기의 내보내기와 같음). 물리·슬라이더 제약, 시퀀스, Proportional 간격처럼 3.8 에 없는 기능이 있으면 내보내지 않습니다.
 
-팩 설정의 Options 에 있는 **Unity (spine-unity)** 를 켜면 spine-unity 가 가져오는 형식으로 맞춥니다: atlas 는 `.atlas.txt`, 바이너리는 `.skel.bytes`(끄면 켜기 전 확장자로 돌아갑니다).
+팩 설정의 Options 에 있는 **Unity (spine-unity)** 를 켜면 spine-unity 가 가져오는 형식으로 맞춥니다: atlas 는 `.atlas.txt`, 바이너리는 `.skel.bytes`(끄면 `.skel`). JSON 은 늘 표준 JSON(`.json`)으로 씁니다.
 
 슬라이더는 막대를 누르거나 끌고, 라벨을 좌우로 끌거나, 숫자칸에 직접 적어 바꿉니다. 막대에 포커스가 있으면 방향키(Shift 는 10씩)와 휠도 됩니다. 크기 막대(Min/Max width·height)는 2의 거듭제곱 눈금에 붙고, 그 사이 값은 숫자칸에 적습니다.
 
-스켈레톤 데이터 탭에는 Spine 내보내기 대화상자의 **JSON 형식**(JSON · JavaScript · Minimal), **Pretty print**, **JSON 확장자**, **모두 내보내기**(Export all: Export 체크가 꺼진 첨부도 포함), **경고**가 있습니다. 텍스처 아틀라스 탭은 Spine 과 같은 배치입니다: **팩** 체크 · 묶을 이미지(**어태치먼트** · **이미지 폴더**) ~ 단위(**스켈레톤별 아틀라스** · **싱글 아틀라스** = 프로젝트 파일 이름), 그 아래 **팩 설정…**.
+스켈레톤 데이터 탭에는 **형식**(JSON · 바이너리 · 둘 다), **비필수 데이터**, **애니메이션 정리**, **Pretty print**(JSON), **모두 내보내기**(Export all: Export 체크가 꺼진 첨부도 포함), **경고**가 있습니다. 텍스처 아틀라스 탭은 Spine 과 같은 배치입니다: **팩** 체크 · 묶을 이미지(**어태치먼트** · **이미지 폴더**) ~ 단위(**스켈레톤별 아틀라스** · **싱글 아틀라스** = 프로젝트 파일 이름), 그 아래 **팩 설정…**.
 
 아래 **설정 불러오기… / 설정 저장…** 은 Spine 내보내기 대화상자의 Save 로 만든 설정 JSON(`"class": "export-json"` · `"export-binary"`)을 읽고 씁니다. 출력 폴더는 불러온 뒤 알림의 «출력 폴더도 적용»을 눌러야 바뀝니다.
 
-팩 설정 대화상자의 **Load / Save** 는 Spine 이 쓰는 `pack.json` 을 그대로 읽고 씁니다. 출력 형식은 PNG 만 되고, *Packing: Polygons* · *Legacy output* · *Auto scale* 은 지원하지 않습니다. *Combine subdirectories* 는 «이미지 폴더»로 묶을 때만 씁니다(폴더 안 `pack.json` 은 읽지 않습니다). *Format* 은 atlas 의 `format:` 줄만 바꾸고 PNG 는 RGBA 로 저장합니다.
+팩 설정 대화상자의 **Load / Save** 는 Spine 이 쓰는 `pack.json` 을 그대로 읽고 씁니다. 출력 형식은 PNG 만 되고, *Auto scale* 은 지원하지 않습니다. *Legacy output* 을 켜면 3.8 이하 런타임이 읽는 옛 atlas 형식으로 씁니다(런타임 버전을 3.8 로 고르면 Spine 처럼 꺼져 있어도 옛 형식으로 씁니다). 메시만 쓰는 이미지는 패킹 방식과 상관없이 Spine 처럼 메시 UV 범위로 자릅니다. *Packing: Polygons* 는 메시만 쓰는 이미지를 메시가 덮는 모양대로 묶습니다(영역 첨부가 쓰는 이미지는 사각형 그대로이고, 페이지 안 배치는 Spine 과 다릅니다). Spine 처럼 다각형 모양은 사각형보다 1픽셀 가깝게 놓습니다(여백 2 면 모양 사이 빈 픽셀이 1줄 이상). *Combine subdirectories* 는 «이미지 폴더»로 묶을 때만 씁니다(폴더 안 `pack.json` 은 읽지 않습니다). *Format* 은 atlas 의 `format:` 줄만 바꾸고 PNG 는 RGBA 로 저장합니다.
 
 ## 구조
 
@@ -29,7 +31,7 @@ Spine 프로그램 없이 `.spine` 프로젝트에서 고른 스켈레톤만 런
 |---|---|
 | `crates/spine-model` | 버전 중립 스켈레톤 모델(C# `SkeletonModel`) |
 | `crates/spine-project` | `.spine` 컨테이너·스키마·객체 그래프 읽기 → 모델 |
-| `crates/spine-json` | 모델 → 런타임 JSON (4.0 ~ 4.3) |
+| `crates/spine-json` | 모델 → 런타임 JSON (3.8, 4.0 ~ 4.3) |
 | `crates/spine-binary` | 모델 → `.skel`, 애니메이션 정리 |
 | `crates/spine-atlas` | 이미지 → atlas + PNG (Spine Texture Packer Settings: 여백·회전·POT·격자·배율 등) |
 | `crates/spine-export` | 내보내기 파사드 + `spine-export-cli` |

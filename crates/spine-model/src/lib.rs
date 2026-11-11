@@ -385,6 +385,10 @@ pub struct ModelKey {
     pub dense: Option<Vec<f64>>,
     pub event: Option<ModelKeyEvent>,
     pub offsets: Option<Vec<(String, i64)>>,
+    /// 3.8 프로젝트의 베지어 키: 원래의 정규화 곡선(c1 c2 c3 c4). `handles` 는 이것을 4.x 손잡이로 펼친 것이다.
+    pub curve38: Option<[f64; 4]>,
+    /// 3.8 프로젝트의 회전 키: 프로젝트에 적힌 각도 그대로(`values` 는 4.x 식으로 이어 붙인 값).
+    pub angle38: Option<f64>,
 }
 
 /// atlas 페이지 하나. rgba 는 위쪽 줄부터, 픽셀당 4바이트(패커가 PMA 등을 적용한 최종 값).

@@ -166,18 +166,18 @@ impl ExportOptions {
     }
 }
 
-/// 버전 문자열 검사(4.0.xx ~ 4.3.xx).
+/// 버전 문자열 검사(3.8.xx, 4.0.xx ~ 4.3.xx).
 pub fn check_version(s: &str) -> SpineResult<()> {
-    let parts: Vec<&str> = s.split('.').collect();
-    let ok = parts.len() == 3
-        && parts.iter().all(|p| !p.is_empty() && p.len() < 8 && p.bytes().all(|b| b.is_ascii_digit()))
-        && parts[0] == "4"
-        && parts[1].parse::<u32>().map(|m| m <= 3).unwrap_or(false);
-    if ok {
+    if spine_json::supported_version(s) {
         Ok(())
     } else {
-        Err(SpineError::Usage(format!("내보낼 버전은 4.0.xx ~ 4.3.xx 형식이어야 합니다: {s}")))
+        Err(SpineError::Usage(format!("내보낼 버전은 3.8.xx 또는 4.0.xx ~ 4.3.xx 형식이어야 합니다: {s}")))
     }
+}
+
+/// 바이너리(.skel)로 쓸 수 있는 버전인지(3.8.xx, 4.0.xx ~ 4.3.xx).
+pub fn binary_version(s: &str) -> bool {
+    spine_json::supported_version(s)
 }
 
 /// 스켈레톤 하나를 내보낸 결과.
@@ -224,6 +224,30 @@ pub fn resolve_version(project: &SpineProject, opts: &ExportOptions) -> SpineRes
     Ok(v)
 }
 
+/// Spine 3.8 편집기가 하는 내보내기인가: 3.8 프로젝트를 3.8 로 내보낼 때. atlas 머리말의 글자를 고르는 데 쓴다.
+/// (4.x 프로젝트를 3.8 로 내보내는 것은 Spine 4.x 의 «Version» 내보내기라 4.x 의 글자를 따른다.)
+fn editor_38(project_format: &str, version: &str) -> bool {
+    project_format.starts_with("3.") && version.starts_with("3.")
+}
+
+/// 프로젝트와 내보낼 버전에 맞춘 설정을 돌려준다. 내보내기 전에 한 번 거친다.
+///
+/// Spine 3.8 의 내보내기에는 Pack target 이 없다(atlas 는 늘 스켈레톤마다 하나). 3.8 로 내보낼 때는 프로젝트가
+/// 어느 버전이든 «Single atlas» 가 골라져 있어도 스켈레톤별로 만든다(화면에서도 그 선택을 숨긴다).
+pub fn options_for(project: &SpineProject, opts: &ExportOptions) -> ExportOptions {
+    let mut o = opts.clone();
+    let version = if o.version.trim().is_empty() { project.format_version() } else { o.version.trim() };
+    if per_skeleton_only(version) {
+        o.pack_target = PackTarget::PerSkeleton;
+    }
+    o
+}
+
+/// 이 버전으로 내보낼 때는 atlas 를 스켈레톤별로만 만드는가(3.8).
+fn per_skeleton_only(version: &str) -> bool {
+    version.starts_with("3.")
+}
+
 /// 스켈레톤 하나를 out_dir 에 내보낸다.
 pub fn export_skeleton(
     project: &SpineProject,
@@ -233,7 +257,7 @@ pub fn export_skeleton(
     opts: &ExportOptions,
 ) -> SpineResult<ExportReport> {
     let version = resolve_version(project, opts)?;
-    let mut model = project.read_model_with(index, opts.export_all)?;
+    let mut model = project.read_model_for(index, opts.export_all, Some(&version))?;
     if opts.clean {
         spine_binary::clean_model(&mut model);
     }
@@ -243,13 +267,22 @@ pub fn export_skeleton(
     fs::create_dir_all(out_dir)?;
 
     if opts.format.json() {
-        let text = spine_json::write_json_styled(&model, &version, opts.nonessential.unwrap_or(true), opts.json_format.style(), opts.pretty_print)?;
+        let (text, notes) =
+            spine_json::write_json_with_notes(&model, &version, opts.nonessential.unwrap_or(true), opts.json_format.style(), opts.pretty_print)?;
         let path = out_dir.join(format!("{file_name}{}", opts.json_ext));
         fs::write(&path, text)?;
         report.files.push(path);
+        report.notes.extend(notes.into_iter().map(|n| format!("{file_name}{}: {n}", opts.json_ext)));
     }
 
-    if opts.format.binary() {
+    if opts.format.binary() && !binary_version(&version) {
+        // 바이너리를 쓸 수 없는 버전: 바이너리만 고르면 오류, 둘 다면 .skel 만 건너뛴다
+        let msg = format!("{version} 은 바이너리(.skel)로 내보낼 수 없습니다. JSON 으로 내보내세요.");
+        if opts.format == SkeletonFormat::Binary {
+            return Err(SpineError::Usage(msg));
+        }
+        report.notes.push(format!("{file_name}{} 은 만들지 않았습니다: {msg}", opts.skel_ext));
+    } else if opts.format.binary() {
         match spine_binary::unsupported_binary(&model, &version) {
             Some(reason) if opts.format == SkeletonFormat::Binary => {
                 return Err(SpineError::Unsupported(format!(
@@ -260,7 +293,20 @@ pub fn export_skeleton(
                 report.notes.push(format!("{file_name}{} 은 만들지 않았습니다(이 버전에 없는 기능: {reason}).", opts.skel_ext));
             }
             None => {
-                let data = spine_binary::write_binary(&model, &version, opts.nonessential.unwrap_or(false))?;
+                // 3.8: JSON 의 3.8 내보내기와 같은 변환을 거친 모델로 쓴다(X·Y 따로 이동 합치기 등)
+                let for_38;
+                let source = if version.starts_with("3.") {
+                    let (m, notes) = spine_json::model_for_38(&model)?;
+                    if !opts.format.json() {
+                        // JSON 도 함께 내보내면 같은 알림이 이미 있다
+                        report.notes.extend(notes.into_iter().map(|n| format!("{file_name}{}: {n}", opts.skel_ext)));
+                    }
+                    for_38 = m;
+                    &for_38
+                } else {
+                    &model
+                };
+                let data = spine_binary::write_binary(source, &version, opts.nonessential.unwrap_or(false))?;
                 let path = out_dir.join(format!("{file_name}{}", opts.skel_ext));
                 fs::write(&path, data)?;
                 report.files.push(path);
@@ -271,7 +317,7 @@ pub fn export_skeleton(
     if opts.atlas && opts.pack_target == PackTarget::PerSkeleton {
         let images = images_dir(&model, spine_path, opts.images_dir.as_deref());
         let sources = sources_for(&model, &images, opts)?;
-        write_atlas(&sources, &images, &file_name, out_dir, &opts.pack, &mut report)?;
+        write_atlas(&sources, &images, &file_name, out_dir, &opts.pack, &version, project.format_version(), &mut report)?;
     }
 
     if !opts.warnings {
@@ -289,12 +335,24 @@ fn sources_for(model: &SkeletonModel, images: &Path, opts: &ExportOptions) -> Sp
 }
 
 /// 이미지 목록을 묶어 `base + 접미사 + 확장자` 와 페이지 PNG 를 쓴다.
-fn write_atlas(sources: &[Source], images: &Path, base: &str, out_dir: &Path, pack: &AtlasSettings, report: &mut ExportReport) -> SpineResult<()> {
+/// `project_format` 은 프로젝트를 저장한 Spine 버전: 3.8 프로젝트를 3.8 로 내보내면 머리말을 Spine 3.8 편집기의 글자로 쓴다.
+#[allow(clippy::too_many_arguments)]
+fn write_atlas(
+    sources: &[Source],
+    images: &Path,
+    base: &str,
+    out_dir: &Path,
+    pack: &AtlasSettings,
+    runtime: &str,
+    project_format: &str,
+    report: &mut ExportReport,
+) -> SpineResult<()> {
+    // 3.8 런타임의 atlas 파서는 옛 형식만 차례대로 읽는다(새 형식의 `bounds:` 줄을 모른다).
+    // Spine 도 3.8 로 내보내면 Legacy output 을 꺼 두어도 옛 형식으로 쓴다.
+    let legacy = AtlasSettings { legacy_output: true, legacy_editor38: editor_38(project_format, runtime), ..pack.clone() };
+    let pack = if runtime.starts_with("3.") { &legacy } else { pack };
     if pack.bleed && pack.pma {
         report.notes.push("PMA 가 켜져 있어 블리드는 적용하지 않았습니다.".into());
-    }
-    if pack.packing.eq_ignore_ascii_case("polygons") {
-        report.notes.push("Packing: Polygons 는 지원하지 않아 직사각형으로 묶었습니다.".into());
     }
     for (suffix, packed) in spine_atlas::pack_sources_scales(sources, base, pack)? {
         let tag = if suffix.is_empty() { String::new() } else { format!("[{suffix}] ") };
@@ -352,7 +410,8 @@ pub fn export_single_atlas(project: &SpineProject, indices: &[usize], spine_path
     if !clash.is_empty() {
         report.notes.push(format!("이름이 같은 다른 이미지 {}개는 먼저 나온 것을 썼습니다: {}", clash.len(), short_list(&clash)));
     }
-    write_atlas(&sources, &first_images.unwrap_or_default(), &name, out_dir, &opts.pack, &mut report)?;
+    let version = resolve_version(project, opts)?;
+    write_atlas(&sources, &first_images.unwrap_or_default(), &name, out_dir, &opts.pack, &version, project.format_version(), &mut report)?;
     if !opts.warnings {
         report.notes.clear();
     }
@@ -484,12 +543,6 @@ pub fn import_spine_settings(text: &str, base: &ExportOptions) -> SpineResult<Im
                 notes.push(format!("출력 형식 {} 은 지원하지 않아 PNG 로 바꿨습니다.", o.pack.output_format));
                 o.pack.output_format = "png".into();
             }
-            if o.pack.packing == "polygons" {
-                notes.push("Packing: Polygons 는 지원하지 않아 직사각형으로 묶습니다.".into());
-            }
-            if p.get("legacyOutput").and_then(Value::as_bool) == Some(true) {
-                notes.push("Legacy output 은 지원하지 않습니다(새 atlas 형식으로 씁니다).".into());
-            }
             if p.get("autoScale").and_then(Value::as_bool) == Some(true) {
                 notes.push("Auto scale 은 지원하지 않습니다.".into());
             }
@@ -510,6 +563,13 @@ pub fn import_spine_settings(text: &str, base: &ExportOptions) -> SpineResult<Im
         None => {}
     }
     Ok(ImportedSettings { options: o, output: string("output"), version: string("version"), notes })
+}
+
+/// 프로젝트에 저장된 마지막 데이터 내보내기 설정(Spine Export 대화상자에서 마지막으로 쓴 JSON · 바이너리 설정)을 base 위에 덮는다.
+/// 저장된 설정이 없으면 None. 출력 폴더는 Spine 이 적은 그대로다(상대 경로면 프로젝트 폴더 기준).
+pub fn project_export_settings(project: &SpineProject, base: &ExportOptions) -> Option<SpineResult<ImportedSettings>> {
+    let settings = project.last_export_settings()?;
+    Some(import_spine_settings(&settings.to_string(), base))
 }
 
 /// 지금 설정을 Spine 내보내기 설정 JSON 으로. 형식이 JSON 이면 `export-json`, 아니면 `export-binary`.
@@ -560,6 +620,24 @@ fn missing_note(missing: &[String], images: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// atlas 머리말은 3.8 프로젝트를 3.8 로 내보낼 때만 Spine 3.8 편집기의 글자를 따른다.
+    #[test]
+    fn editor_38_is_38_project_to_38() {
+        assert!(editor_38("3.8.75", "3.8.99"));
+        assert!(!editor_38("4.2.43", "3.8.99")); // Spine 4.x 의 «Version» 내보내기
+        assert!(!editor_38("3.8.75", "4.2.43")); // Spine 4.x 로 열어 내보내기
+        assert!(!editor_38("4.2.43", "4.2.43"));
+    }
+
+    /// 3.8 로 내보낼 때는 프로젝트 버전과 상관없이 스켈레톤별 atlas 만 만든다.
+    #[test]
+    fn target_38_packs_per_skeleton_only() {
+        assert!(per_skeleton_only("3.8.99"));
+        assert!(per_skeleton_only("3.8.55"));
+        assert!(!per_skeleton_only("4.0.64"));
+        assert!(!per_skeleton_only("4.2.43"));
+    }
 
     /// 프런트엔드(src/main.ts)의 DEFAULT_PACK 이 Rust 기본값과 같은지 본다.
     #[test]

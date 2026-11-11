@@ -3,6 +3,7 @@
 //! 공개 API(계약): [`write_json`]
 //!
 //! 4.0·4.1·4.2 는 옛 목록형, 4.3 은 constraints 통합형.
+//! 3.8 은 4.0 형식에서 mix 이름·스킨 등이 다르고, Spine 처럼 베지어 곡선은 직선으로 바꾼다([`v38`] 참고).
 //! 4.0~4.2 는 값 종류마다 정해진 소수 자릿수로 반올림하고 끝의 0을 지운다.
 //! 4.3 은 반올림하지 않고 float32 의 가장 짧은 표기를 쓴다. 기본값과 같은 필드는 쓰지 않는다.
 
@@ -10,13 +11,15 @@ mod json;
 mod natural;
 mod numbers;
 mod sha1;
+mod v38;
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use spine_model::{
-    ModelAnimation, ModelAttachment, ModelBone, ModelConstraint, ModelEvent, ModelFromProperty, ModelKey, ModelSkin,
-    ModelSkinEntry, ModelSlot, ModelTimeline, ModelToProperty, SkeletonModel, SpineError, SpineResult,
+    ModelAnimation, ModelAttachment, ModelBone, ModelConstraint, ModelEvent, ModelFromProperty, ModelKey, ModelSkin, ModelSkinEntry, ModelSlot, ModelTimeline,
+    ModelToProperty, SkeletonModel, SpineError, SpineResult,
 };
 
 use json::{dumps_styled, write_map_entries, JsonMap, J};
@@ -30,16 +33,41 @@ pub mod number {
     pub use crate::numbers::{fmt_f32, fmt_round, java_double, round_half_up};
 }
 
-/// version: "4.0.xx" ~ "4.3.xx". nonessential: 비필수 데이터 포함.
+/// version: "3.8.xx", "4.0.xx" ~ "4.3.xx". nonessential: 비필수 데이터 포함.
 pub fn write_json(model: &SkeletonModel, version: &str, nonessential: bool) -> SpineResult<String> {
     write_json_styled(model, version, nonessential, JsonFormat::Json, false)
 }
 
 /// [`write_json`] 에 Spine 내보내기 대화상자의 Format · Pretty print 를 더한 것.
 pub fn write_json_styled(model: &SkeletonModel, version: &str, nonessential: bool, format: JsonFormat, pretty: bool) -> SpineResult<String> {
+    write_json_with_notes(model, version, nonessential, format, pretty).map(|(text, _)| text)
+}
+
+/// [`write_json_styled`] 와 같고, 옛 버전으로 바꾸며 달라진 점(알림)을 함께 돌려준다.
+pub fn write_json_with_notes(model: &SkeletonModel, version: &str, nonessential: bool, format: JsonFormat, pretty: bool) -> SpineResult<(String, Vec<String>)> {
     let w = Writer::new(model, version, nonessential)?;
     let output = w.build()?;
-    Ok(dumps_styled(&J::Map(output), format, pretty))
+    Ok((dumps_styled(&J::Map(output), format, pretty), w.take_notes()))
+}
+
+/// 3.8 바이너리(.skel)용: 애니메이션의 타임라인을 3.8 에 있는 종류로 바꾼 모델과 알림.
+/// JSON 의 3.8 내보내기와 같은 변환을 쓴다(X·Y 를 따로 둔 이동은 하나로 합치고 시퀀스 키는 뺀다).
+/// 알림도 JSON 3.8 내보내기와 같다(베지어 → 직선 등). 3.8 에 없는 기능이 있으면 오류.
+pub fn model_for_38(model: &SkeletonModel) -> SpineResult<(SkeletonModel, Vec<String>)> {
+    let w = Writer::new(model, "3.8.99", false)?;
+    w.build()?; // 알림을 모은다
+    let mut out = model.clone();
+    for (an, src) in out.animations.iter_mut().zip(&model.animations) {
+        an.timelines = w.timelines38(src);
+    }
+    Ok((out, w.take_notes()))
+}
+
+/// JSON 으로 내보낼 수 있는 버전인지(3.8.xx, 4.0.xx ~ 4.3.xx).
+pub fn supported_version(version: &str) -> bool {
+    let parts: Vec<&str> = version.split('.').collect();
+    let num = |p: &str| !p.is_empty() && p.len() < 8 && p.bytes().all(|b| b.is_ascii_digit());
+    parts.len() == 3 && parts.iter().all(|p| num(p)) && matches!((parts[0], parts[1].parse::<u32>().unwrap_or(99)), ("4", 0..=3) | ("3", 8))
 }
 
 const UNSET: f64 = 2147483648.0;
@@ -166,21 +194,15 @@ fn same_key_stepped(k: &ModelKey, next: &ModelKey, channels: usize) -> bool {
     true
 }
 
-fn put_curve(o: &mut JsonMap, curve: Option<J>) {
-    if let Some(c) = curve {
-        o.set("curve", c);
-    }
-}
-
 fn set_if(o: &mut JsonMap, key: &str, on: bool) {
     if on {
         o.set(key, J::Bool(true));
     }
 }
 
-fn header_fields(o: &mut JsonMap, c: &ModelConstraint) {
+fn header_fields(o: &mut JsonMap, c: &ModelConstraint, always_order: bool) {
     o.set("name", J::opt(&c.name));
-    if c.order != 0 {
+    if c.order != 0 || always_order {
         o.set("order", J::Int(c.order as i64));
     }
     if c.skin {
@@ -297,30 +319,80 @@ struct Writer<'a> {
     major: i32,
     minor: i32,
     v43: bool,
+    /// 3.8 형식(곡선·mix 이름·회전 보간이 다르다).
+    v38: bool,
+    /// 숫자를 4.3 식으로 쓴다(float32 최단 표기, 시간 = 프레임 ÷ fps). 4.3 이거나, 4.3 프로젝트를 3.8 로 내릴 때.
+    /// Spine 의 3.8 내보내기는 원본 프로젝트의 숫자 표기를 그대로 둔다(공식 CLI 출력과 비교해 확인).
+    f43: bool,
+    /// 3.8 로 내릴 때 곡선을 옮긴다: 3.8 프로젝트(곡선이 원래 키마다 하나). 4.x 프로젝트는 Spine 처럼 직선으로 바꾼다.
+    keep_curves: bool,
     nonessential: bool,
     fps: f64,
+    /// 알림: 내용 → 해당하는 곳(애니메이션/뼈 등).
+    notes: RefCell<BTreeMap<String, BTreeSet<String>>>,
 }
 
 impl<'a> Writer<'a> {
     fn new(model: &'a SkeletonModel, version: &str, nonessential: bool) -> SpineResult<Writer<'a>> {
-        let bad = || SpineError::Usage(format!("내보낼 버전은 4.0.xx ~ 4.3.xx 형식이어야 합니다: {}", version));
+        let bad = || SpineError::Usage(format!("내보낼 버전은 3.8.xx 또는 4.0.xx ~ 4.3.xx 형식이어야 합니다: {}", version));
         let parts: Vec<&str> = version.split('.').collect();
         if parts.len() < 2 {
             return Err(bad());
         }
         let major: i32 = parts[0].parse().map_err(|_| bad())?;
         let minor: i32 = parts[1].parse().map_err(|_| bad())?;
+        if major < 3 || (major == 3 && minor != 8) {
+            return Err(bad());
+        }
         let mut w = Writer {
             m: model,
             version: version.to_string(),
             major,
             minor,
             v43: false,
+            v38: major == 3,
+            f43: false,
+            keep_curves: false,
             nonessential,
             fps: model.fps,
+            notes: RefCell::new(BTreeMap::new()),
         };
         w.v43 = w.at_least(4, 3);
+        w.f43 = w.v43 || (w.v38 && w.source_at_least(4, 3));
+        w.keep_curves = w.v38 && !w.source_at_least(4, 0);
         Ok(w)
+    }
+
+    /// 알림을 남긴다. 같은 내용은 한 줄로 묶어 `where_` 를 나열한다.
+    fn note(&self, what: &str, where_: String) {
+        self.notes.borrow_mut().entry(what.to_string()).or_default().insert(where_);
+    }
+
+    fn take_notes(&self) -> Vec<String> {
+        const SHOW: usize = 5;
+        let notes = std::mem::take(&mut *self.notes.borrow_mut());
+        notes
+            .into_iter()
+            .map(|(what, at)| {
+                let mut list: Vec<String> = at.into_iter().filter(|s| !s.is_empty()).collect();
+                if list.is_empty() {
+                    return what;
+                }
+                let more = list.len().saturating_sub(SHOW);
+                list.truncate(SHOW);
+                let tail = if more > 0 { format!(" 외 {more}곳") } else { String::new() };
+                format!("{what} ({}{tail})", list.join(", "))
+            })
+            .collect()
+    }
+
+    /// 원본 프로젝트(model.format)가 major.minor 이상인지. 모르면 false.
+    fn source_at_least(&self, major: i32, minor: i32) -> bool {
+        let mut it = self.m.format.as_deref().unwrap_or("").split('.').map(|p| p.parse::<i32>().ok());
+        match (it.next().flatten(), it.next().flatten()) {
+            (Some(a), Some(b)) => a > major || (a == major && b >= minor),
+            _ => false,
+        }
     }
 
     fn at_least(&self, major: i32, minor: i32) -> bool {
@@ -330,17 +402,17 @@ impl<'a> Writer<'a> {
     // ------------------------------------------------------------ 숫자
 
     fn n(&self, x: f64, kind: Kind) -> J {
-        J::Num(if self.v43 { fmt_f32(x, true) } else { fmt_round(x, kind.digits()) })
+        J::Num(if self.f43 { fmt_f32(x, true) } else { fmt_round(x, kind.digits()) })
     }
 
     /// 4.3 에서 정수도 '.0' 을 붙이는 자리(정점·메시 크기 등).
     fn nf(&self, x: f64, kind: Kind) -> J {
-        J::Num(if self.v43 { fmt_f32(x, false) } else { fmt_round(x, kind.digits()) })
+        J::Num(if self.f43 { fmt_f32(x, false) } else { fmt_round(x, kind.digits()) })
     }
 
     /// 프레임 → 초. 4.0~4.2 편집기는 float32 로 1/fps 를 곱하고, 4.3 은 fps 로 나눈다.
     fn sec(&self, frame: f64) -> f64 {
-        if self.v43 {
+        if self.f43 {
             return f32r(f32r(frame) / f32r(self.fps));
         }
         f32r(f32r(frame) * f32r(1.0 / self.fps))
@@ -351,7 +423,7 @@ impl<'a> Writer<'a> {
     }
 
     fn is_default(&self, x: f64, d: f64, kind: Kind) -> bool {
-        if self.v43 {
+        if self.f43 {
             // 4.3 도 값 종류별 자릿수로 기본값을 판정한다(뼈 scaleY 0.999634 는 쓰고, 위치 0.004 는 뺀다)
             return round_half_up(f32r(x) - f32r(d), kind.digits()) == 0.0;
         }
@@ -360,7 +432,7 @@ impl<'a> Writer<'a> {
 
     /// 정점 좌표·가중치: 4.3 도 값은 자릿수로 반올림한다(표기만 float).
     fn vert(&self, x: f64, kind: Kind) -> J {
-        if self.v43 {
+        if self.f43 {
             return J::Num(fmt_f32(round_half_up(x, kind.digits()), false));
         }
         J::Num(fmt_round(x, kind.digits()))
@@ -373,6 +445,21 @@ impl<'a> Writer<'a> {
         }
     }
 
+    /// 키의 곡선. 4.x: "stepped" 또는 채널마다 손잡이 4개. 3.8: "stepped" 또는 curve(c1)·c2·c3·c4(기본값 0 1 1 은 뺀다).
+    fn put_curve(&self, o: &mut JsonMap, curve: Option<J>) {
+        match curve {
+            Some(J::List(v)) if self.v38 => {
+                for (x, (name, d)) in v.into_iter().zip([("curve", ""), ("c2", "0"), ("c3", "1"), ("c4", "1")]) {
+                    if !matches!(&x, J::Num(s) if s == d) {
+                        o.set(name, x);
+                    }
+                }
+            }
+            Some(c) => o.set("curve", c),
+            None => {}
+        }
+    }
+
     // ------------------------------------------------------------ 전체
 
     fn build(&self) -> SpineResult<JsonMap> {
@@ -382,6 +469,9 @@ impl<'a> Writer<'a> {
         output.set("bones", J::List(m.bones.iter().map(|b| self.bone(b)).collect()));
         output.set("slots", J::List(m.slots.iter().map(|s| self.slot(s)).collect()));
         let cons = &m.constraints;
+        if self.v38 {
+            self.check38()?;
+        }
         if self.v43 {
             if !cons.is_empty() {
                 output.set("constraints", J::List(cons.iter().map(|c| self.constraint43(c)).collect()));
@@ -412,6 +502,9 @@ impl<'a> Writer<'a> {
 
         let mut skins = Vec::with_capacity(m.skins.len());
         for s in &m.skins {
+            if self.v38 && eq(&s.name, "default") && s.attachments.is_empty() && s.bones.is_empty() && s.constraints.is_empty() {
+                continue; // 3.8 편집기는 빈 기본 스킨을 쓰지 않는다
+            }
             skins.push(self.skin(s)?);
         }
         output.set("skins", J::List(skins));
@@ -466,7 +559,7 @@ impl<'a> Writer<'a> {
             }
             s.set("images", J::opt(&m.images));
             let audio = match &m.audio {
-                Some(a) if !a.is_empty() || !self.v43 => J::str(a),
+                Some(a) if !a.is_empty() || !self.f43 => J::str(a),
                 _ => J::Null,
             };
             s.set("audio", audio);
@@ -500,7 +593,9 @@ impl<'a> Writer<'a> {
             if !is_null_or_empty(&b.color) && !eq(&b.color, "989898ff") && !eq(&b.color, "9b9b9bff") {
                 o.set("color", J::opt(&b.color));
             }
-            if !is_null_or_empty(&b.icon) && !eq(&b.icon, "bone") && self.at_least(4, 1) {
+            // 3.8 런타임은 icon 을 읽지 않는다. Spine 의 3.8 내보내기는 4.2·4.3 프로젝트일 때만 icon 을 남긴다
+            // (3.8·4.1 프로젝트는 쓰지 않는다. 공식 CLI 와 Spine 3.8 편집기 출력과 비교해 확인)
+            if !is_null_or_empty(&b.icon) && !eq(&b.icon, "bone") && (self.at_least(4, 1) || (self.v38 && self.source_at_least(4, 2))) {
                 o.set("icon", J::opt(&b.icon));
             }
         }
@@ -531,7 +626,7 @@ impl<'a> Writer<'a> {
 
     fn ik(&self, c: &ModelConstraint) -> J {
         let mut o = JsonMap::new();
-        header_fields(&mut o, c);
+        header_fields(&mut o, c, self.v38 && self.f43);
         o.set("bones", J::strings(&c.bones));
         o.set("target", J::opt(&c.target));
         self.put(&mut o, "mix", c.mix, 1.0, Mix);
@@ -542,22 +637,40 @@ impl<'a> Writer<'a> {
 
     fn transform(&self, c: &ModelConstraint) -> J {
         let mut o = JsonMap::new();
-        header_fields(&mut o, c);
+        header_fields(&mut o, c, self.v38 && self.f43);
         o.set("bones", J::strings(&c.bones));
         o.set("target", J::opt(&c.target));
-        self.put(&mut o, "rotation", c.rotation, 0.0, Pos);
+        // 3.8: 4.3 프로젝트의 변형 제약은 대상 속성이 아닌 오프셋을 쓰지 않는다(공식 CLI 출력과 같게)
+        let targets = match (&c.properties, self.v38) {
+            (Some(p), true) => Some(target_names(p)),
+            _ => None,
+        };
+        let has = |prop: &str| targets.as_ref().is_none_or(|t| t.contains(prop));
+        if has("rotate") {
+            self.put(&mut o, "rotation", c.rotation, 0.0, Pos);
+        }
         if c.local {
             o.set("local", J::Bool(true));
         }
         if c.relative {
             o.set("relative", J::Bool(true));
         }
-        self.put(&mut o, "x", c.x, 0.0, Pos);
-        self.put(&mut o, "y", c.y, 0.0, Pos);
-        self.put(&mut o, "scaleX", c.scale_x, 0.0, Scale);
-        self.put(&mut o, "scaleY", c.scale_y, 0.0, Scale);
-        self.put(&mut o, "shearY", c.shear_y, 0.0, Pos);
-        self.mixes(&mut o, &c.mixes, false);
+        for (name, prop, value, kind) in [
+            ("x", "x", c.x, Pos),
+            ("y", "y", c.y, Pos),
+            ("scaleX", "scaleX", c.scale_x, Scale),
+            ("scaleY", "scaleY", c.scale_y, Scale),
+            ("shearY", "shearY", c.shear_y, Pos),
+        ] {
+            if has(prop) {
+                self.put(&mut o, name, value, 0.0, kind);
+            }
+        }
+        if self.v38 {
+            self.mixes38(&mut o, &c.mixes, key(&c.name));
+        } else {
+            self.mixes(&mut o, &c.mixes, false);
+        }
         J::Map(o)
     }
 
@@ -575,6 +688,15 @@ impl<'a> Writer<'a> {
         self.put(o, "rotation", c.rotation, 0.0, Pos);
         self.put(o, "position", c.position, 0.0, pos);
         self.put(o, "spacing", c.spacing, 0.0, spc);
+        if self.v38 {
+            let mx = &c.mixes;
+            self.put(o, "rotateMix", mx[ModelConstraint::MIX_ROTATE], 1.0, Mix);
+            self.put(o, "translateMix", mx[ModelConstraint::MIX_X], 1.0, Mix);
+            if !self.is_default(mx[ModelConstraint::MIX_Y], mx[ModelConstraint::MIX_X], Mix) {
+                self.note(v38::NOTE_PATH_MIX, key(&c.name).to_string());
+            }
+            return;
+        }
         self.put(o, "mixRotate", c.mixes[ModelConstraint::MIX_ROTATE], 1.0, Mix);
         self.put(o, "mixX", c.mixes[ModelConstraint::MIX_X], 1.0, Mix);
         self.put(o, "mixY", c.mixes[ModelConstraint::MIX_Y], c.mixes[ModelConstraint::MIX_X], Mix);
@@ -582,7 +704,7 @@ impl<'a> Writer<'a> {
 
     fn path(&self, c: &ModelConstraint) -> J {
         let mut o = JsonMap::new();
-        header_fields(&mut o, c);
+        header_fields(&mut o, c, self.v38 && self.f43);
         o.set("bones", J::strings(&c.bones));
         o.set("target", J::opt(&c.target));
         self.path_fields(&mut o, c);
@@ -616,7 +738,7 @@ impl<'a> Writer<'a> {
 
     fn physics(&self, c: &ModelConstraint) -> J {
         let mut o = JsonMap::new();
-        header_fields(&mut o, c);
+        header_fields(&mut o, c, self.v38 && self.f43);
         o.set("bone", J::opt(&c.bone));
         self.physics_fields(&mut o, c);
         J::Map(o)
@@ -636,6 +758,87 @@ impl<'a> Writer<'a> {
         for i in 0..6 {
             self.put(o, ModelConstraint::MIX_NAMES[i], c[i], defaults[i], kind);
         }
+    }
+
+    /// 3.8 의 mix 네 개. 4.x 의 Y·scaleY mix 는 3.8 에 없어 X·scaleX 와 같아야 그대로 옮겨진다.
+    fn mixes38(&self, o: &mut JsonMap, c: &[f64; 6], name: &str) {
+        self.put(o, "rotateMix", c[ModelConstraint::MIX_ROTATE], 1.0, Mix);
+        self.put(o, "translateMix", c[ModelConstraint::MIX_X], 1.0, Mix);
+        self.put(o, "scaleMix", c[ModelConstraint::MIX_SCALE_X], 1.0, Mix);
+        self.put(o, "shearMix", c[ModelConstraint::MIX_SHEAR_Y], 1.0, Mix);
+        if !self.is_default(c[ModelConstraint::MIX_Y], c[ModelConstraint::MIX_X], Mix)
+            || !self.is_default(c[ModelConstraint::MIX_SCALE_Y], c[ModelConstraint::MIX_SCALE_X], Mix)
+        {
+            self.note(v38::NOTE_TRANSFORM_MIX, name.to_string());
+        }
+    }
+
+    /// 3.8 로 옮길 수 없는 기능이 있으면 오류.
+    fn check38(&self) -> SpineResult<()> {
+        let m = self.m;
+        let mut bad: Vec<&str> = Vec::new();
+        for c in &m.constraints {
+            match c.type_str() {
+                "physics" => bad.push("물리 제약(4.2 이상)"),
+                "slider" => bad.push("슬라이더 제약(4.3 전용)"),
+                "path" if eq(&c.spacing_mode, "proportional") => bad.push("경로 제약의 Proportional 간격(4.0 이상)"),
+                _ => {}
+            }
+        }
+        if m.skins.iter().flat_map(|s| &s.attachments).any(|e| e.attachment.as_ref().is_some_and(|a| a.sequence.is_some())) {
+            bad.push("시퀀스 첨부(4.1 이상)");
+        }
+        bad.sort();
+        bad.dedup();
+        if bad.is_empty() {
+            return Ok(());
+        }
+        Err(SpineError::Unsupported(format!("3.8 로 내보낼 수 없습니다(3.8 에 없는 기능: {}).", bad.join(", "))))
+    }
+
+    /// 3.8 용 타임라인: X·Y 를 따로 둔 이동은 하나로 합치고, 시퀀스 키는 뺀다.
+    fn timelines38(&self, an: &ModelAnimation) -> Vec<ModelTimeline> {
+        let anim = key(&an.name);
+        let mut out: Vec<ModelTimeline> = Vec::with_capacity(an.timelines.len());
+        // 뼈마다 (out 에서의 자리, X, Y). 합친 이동은 처음 나온 자리에 둔다
+        let mut split: Vec<(Option<String>, usize, Option<&ModelTimeline>, Option<&ModelTimeline>)> = Vec::new();
+        for t in &an.timelines {
+            match t.type_str() {
+                ty @ ("translatex" | "translatey") => {
+                    let at = match split.iter().position(|(b, ..)| *b == t.bone) {
+                        Some(i) => i,
+                        None => {
+                            split.push((t.bone.clone(), out.len(), None, None));
+                            out.push(ModelTimeline::default()); // 자리만 잡아 둔다
+                            split.len() - 1
+                        }
+                    };
+                    if ty == "translatex" {
+                        split[at].2 = Some(t);
+                    } else {
+                        split[at].3 = Some(t);
+                    }
+                }
+                "sequence" => self.note(v38::NOTE_SEQUENCE, format!("{anim}/{}", key(&t.attachment))),
+                _ => out.push(t.clone()),
+            }
+        }
+        for (bone, at, x, y) in split {
+            if an.timelines.iter().any(|t| t.type_str() == "translate" && t.bone == bone) {
+                // 4.x 편집기는 한 뼈에 둘을 함께 두지 않는다. 있으면 합친 이동은 버린다.
+                self.note(v38::NOTE_TRANSLATE_DROP, format!("{anim}/{}", bone.as_deref().unwrap_or("")));
+                continue;
+            }
+            let (keys, merged) = v38::merge_translate(x.map(|t| &t.keys[..]), y.map(|t| &t.keys[..]));
+            if merged {
+                self.note(v38::NOTE_TRANSLATE_MERGE, format!("{anim}/{}", bone.as_deref().unwrap_or("")));
+            }
+            let code = x.or(y).map(|t| t.code).unwrap_or(1);
+            out[at] = ModelTimeline { r#type: Some("translate".into()), code, bone, keys, ..Default::default() };
+        }
+        // 버린 자리(종류 없음)는 빼낸다
+        out.retain(|t| t.r#type.is_some());
+        out
     }
 
     fn constraint43(&self, c: &ModelConstraint) -> J {
@@ -728,14 +931,7 @@ impl<'a> Writer<'a> {
         let mx = &c.mixes;
         self.put_if_have(&mut o, &targets, "mixRotate", "rotate", mx[ModelConstraint::MIX_ROTATE], 1.0);
         self.put_if_have(&mut o, &targets, "mixX", "x", mx[ModelConstraint::MIX_X], 1.0);
-        self.put_if_have(
-            &mut o,
-            &targets,
-            "mixY",
-            "y",
-            mx[ModelConstraint::MIX_Y],
-            if targets.contains("x") { mx[ModelConstraint::MIX_X] } else { 1.0 },
-        );
+        self.put_if_have(&mut o, &targets, "mixY", "y", mx[ModelConstraint::MIX_Y], if targets.contains("x") { mx[ModelConstraint::MIX_X] } else { 1.0 });
         self.put_if_have(&mut o, &targets, "mixScaleX", "scaleX", mx[ModelConstraint::MIX_SCALE_X], 1.0);
         self.put_if_have(
             &mut o,
@@ -769,11 +965,7 @@ impl<'a> Writer<'a> {
     }
 
     fn constraint(&self, name: &Option<String>) -> SpineResult<&'a ModelConstraint> {
-        self.m
-            .constraints
-            .iter()
-            .find(|c| c.name == *name)
-            .ok_or_else(|| SpineError::Format(format!("제약을 찾을 수 없습니다: {}", key(name))))
+        self.m.constraints.iter().find(|c| c.name == *name).ok_or_else(|| SpineError::Format(format!("제약을 찾을 수 없습니다: {}", key(name))))
     }
 
     fn skin(&self, s: &ModelSkin) -> SpineResult<J> {
@@ -783,9 +975,7 @@ impl<'a> Writer<'a> {
             o.set("bones", J::strings(&s.bones));
         }
 
-        let of_type = |ty: &str| -> Vec<String> {
-            s.constraints.iter().filter(|n| self.constraint_type(n) == Some(ty)).cloned().collect()
-        };
+        let of_type = |ty: &str| -> Vec<String> { s.constraints.iter().filter(|n| self.constraint_type(n) == Some(ty)).cloned().collect() };
         let iks = of_type("ik");
         let trs = of_type("transform");
         let paths = of_type("path");
@@ -807,10 +997,7 @@ impl<'a> Writer<'a> {
         rows.sort_by(|a, b| row_order(a, b));
         let mut atts = JsonMap::new();
         for row in rows {
-            let att = row
-                .attachment
-                .as_ref()
-                .ok_or_else(|| format_err(format!("첨부가 없습니다: {}/{}", key(&row.slot), key(&row.key))))?;
+            let att = row.attachment.as_ref().ok_or_else(|| format_err(format!("첨부가 없습니다: {}/{}", key(&row.slot), key(&row.key))))?;
             let value = self.attachment(att)?;
             atts.get_or_add_map(key(&row.slot)).set(key(&row.key), J::Map(value));
         }
@@ -979,14 +1166,24 @@ impl<'a> Writer<'a> {
     fn animation(&self, an: &ModelAnimation) -> SpineResult<JsonMap> {
         let mut sec = JsonMap::new();
         let mut events: Vec<&ModelTimeline> = Vec::new();
-        for t in &an.timelines {
+        let merged;
+        let timelines: &[ModelTimeline] = if self.v38 {
+            merged = self.timelines38(an);
+            &merged
+        } else {
+            &an.timelines
+        };
+        for t in timelines {
             match t.type_str() {
                 "color" | "attachment" => {
                     if t.type_str() == "attachment" {
                         let keys = self.att_keys(t);
                         sec.get_or_add_map("slots").get_or_add_map(key(&t.slot)).set("attachment", J::List(keys));
                     } else {
-                        let (keys, name) = self.color_keys(t)?;
+                        let (keys, mut name) = self.color_keys(t)?;
+                        if self.v38 {
+                            name = if name == "rgba2" { "twoColor" } else { "color" };
+                        }
                         sec.get_or_add_map("slots").get_or_add_map(key(&t.slot)).set(name, J::List(keys));
                     }
                 }
@@ -1006,10 +1203,7 @@ impl<'a> Writer<'a> {
                     let keys = self.deform_keys(t)?;
                     if !self.at_least(4, 1) {
                         // 4.0: deform/<스킨>/<슬롯>/<첨부> = 키 목록
-                        sec.get_or_add_map("deform")
-                            .get_or_add_map(key(&t.skin))
-                            .get_or_add_map(key(&t.slot))
-                            .set(key(&t.attachment), J::List(keys));
+                        sec.get_or_add_map("deform").get_or_add_map(key(&t.skin)).get_or_add_map(key(&t.slot)).set(key(&t.attachment), J::List(keys));
                     } else {
                         sec.get_or_add_map("attachments")
                             .get_or_add_map(key(&t.skin))
@@ -1027,6 +1221,7 @@ impl<'a> Writer<'a> {
                     let keys = self.value_keys(t, 0.0, Pos);
                     sec.get_or_add_map("bones").get_or_add_map(key(&t.bone)).set(t.type_str(), J::List(keys));
                 }
+                "sequence" if self.v38 => {}
                 "sequence" => {
                     let keys = self.seq_keys(t)?;
                     sec.get_or_add_map("attachments")
@@ -1053,7 +1248,7 @@ impl<'a> Writer<'a> {
                         "pathSpacing" => "spacing",
                         _ => "mix",
                     };
-                    let keys = self.path_keys(t)?;
+                    let keys = self.path_keys(t, key(&an.name))?;
                     sec.get_or_add_map("path").get_or_add_map(key(&t.constraint)).set(name, J::List(keys));
                 }
                 _ => {}
@@ -1122,10 +1317,24 @@ impl<'a> Writer<'a> {
             }
         }
 
-        if same_key_stepped(k, next, kinds.len()) {
+        // 3.8 로 내보내는 3.8 프로젝트의 회전 키는 저장된 각도로 비교한다(-297.81 과 62.19 는 이어 붙이면 같지만 다른 키다)
+        let turned = self.v38 && matches!((k.angle38, next.angle38), (Some(a), Some(b)) if (a - b).abs() > 1e-6);
+        if !turned && same_key_stepped(k, next, kinds.len()) {
             return Some(J::str("stepped"));
         }
         if eq(&k.curve, "linear") {
+            return None;
+        }
+        if self.keep_curves && k.curve38 == Some([0.0, 0.0, 1.0, 1.0]) {
+            return None; // 손잡이가 양 끝점에 붙은 곡선은 직선과 같아 Spine 도 직선으로 쓴다
+        }
+        if self.keep_curves {
+            // 3.8 프로젝트: 곡선을 그대로. 시간 축(c1 c3)은 셋째, 값 축(c2 c4)은 둘째 자리까지(원본 3.8 내보내기와 비교해 확인)
+            return v38::curve(k, next, kinds.len()).map(|c| J::List(c.iter().zip([CTime, Pos, CTime, Pos]).map(|(&x, kind)| self.n(x, kind)).collect()));
+        }
+        if self.v38 {
+            // 4.x 프로젝트: Spine 의 3.8 내보내기처럼 베지어 곡선은 직선으로 바꾼다(계단은 위에서 그대로 둔다)
+            self.note(v38::NOTE_LINEAR, String::new());
             return None;
         }
 
@@ -1174,7 +1383,7 @@ impl<'a> Writer<'a> {
         for (i, k) in t.keys.iter().enumerate() {
             let mut o = self.key_base(k);
             self.put(&mut o, "value", values(k)[0], fallback, kind);
-            put_curve(&mut o, self.curve_of(&t.keys, i, &[kind]));
+            self.put_curve(&mut o, self.curve_of(&t.keys, i, &[kind]));
             output.push(J::Map(o));
         }
         output
@@ -1185,10 +1394,8 @@ impl<'a> Writer<'a> {
         for (i, k) in t.keys.iter().enumerate() {
             let mut o = self.key_base(k);
             let v = values(k);
-            let mode = SEQUENCE_MODES
-                .get(v[0] as i32 as usize)
-                .filter(|_| v[0] as i32 >= 0)
-                .ok_or_else(|| format_err(format!("알 수 없는 시퀀스 모드: {}", v[0])))?;
+            let mode =
+                SEQUENCE_MODES.get(v[0] as i32 as usize).filter(|_| v[0] as i32 >= 0).ok_or_else(|| format_err(format!("알 수 없는 시퀀스 모드: {}", v[0])))?;
             if *mode != "hold" {
                 o.set("mode", J::str(mode));
             }
@@ -1204,7 +1411,7 @@ impl<'a> Writer<'a> {
         Ok(output)
     }
 
-    fn path_keys(&self, t: &ModelTimeline) -> SpineResult<Vec<J>> {
+    fn path_keys(&self, t: &ModelTimeline, anim: &str) -> SpineResult<Vec<J>> {
         let c = self.constraint(&t.constraint)?;
         let (pos, spc) = path_kinds(c);
         let mut output = Vec::with_capacity(t.keys.len());
@@ -1212,7 +1419,24 @@ impl<'a> Writer<'a> {
             let mut o = self.key_base(k);
             let v = values(k);
             let kinds: Vec<Kind>;
-            if t.type_str() == "pathMix" {
+            if self.v38 {
+                // 3.8: position/spacing 키는 값 이름이 타임라인 이름, mix 는 rotateMix · translateMix
+                match t.type_str() {
+                    "pathMix" => {
+                        self.put(&mut o, "rotateMix", v[0], 1.0, Mix);
+                        self.put(&mut o, "translateMix", v[1], 1.0, Mix);
+                        if !self.is_default(v[2], v[1], Mix) {
+                            self.note(v38::NOTE_PATH_MIX, format!("{anim}/{}", key(&t.constraint)));
+                        }
+                        kinds = vec![Mix, Mix];
+                    }
+                    ty => {
+                        let (name, kind) = if ty == "pathPosition" { ("position", pos) } else { ("spacing", spc) };
+                        self.put(&mut o, name, v[0], 0.0, kind);
+                        kinds = vec![kind];
+                    }
+                }
+            } else if t.type_str() == "pathMix" {
                 self.put(&mut o, "mixRotate", v[0], 1.0, Mix);
                 self.put(&mut o, "mixX", v[1], 1.0, Mix);
                 self.put(&mut o, "mixY", v[2], v[1], Mix);
@@ -1222,7 +1446,7 @@ impl<'a> Writer<'a> {
                 self.put(&mut o, "value", v[0], 0.0, kind);
                 kinds = vec![kind];
             }
-            put_curve(&mut o, self.curve_of(&t.keys, i, &kinds));
+            self.put_curve(&mut o, self.curve_of(&t.keys, i, &kinds));
             output.push(J::Map(o));
         }
         Ok(output)
@@ -1237,7 +1461,9 @@ impl<'a> Writer<'a> {
             let mut o = self.key_base(k);
             let v = values(k);
             let kinds: &[Kind] = if ty == "rotate" {
-                self.put(&mut o, "value", v[0], 0.0, Pos);
+                // 3.8 은 가까운 쪽으로 도는 각도를 그대로 쓴다(3.8 프로젝트에 저장된 값). 4.x 는 이어 붙인 값
+                let angle = if self.v38 { k.angle38.unwrap_or(v[0]) } else { v[0] };
+                self.put(&mut o, if self.v38 { "angle" } else { "value" }, angle, 0.0, Pos);
                 &[Pos]
             } else {
                 self.put(&mut o, "x", v[0], d, ckind);
@@ -1248,19 +1474,14 @@ impl<'a> Writer<'a> {
                     &[Pos, Pos]
                 }
             };
-            put_curve(&mut o, self.curve_of(&t.keys, i, kinds));
+            self.put_curve(&mut o, self.curve_of(&t.keys, i, kinds));
             output.push(J::Map(o));
         }
         output
     }
 
     fn color_keys(&self, t: &ModelTimeline) -> SpineResult<(Vec<J>, &'static str)> {
-        let slot = self
-            .m
-            .slots
-            .iter()
-            .find(|s| s.name == t.slot)
-            .ok_or_else(|| format_err(format!("슬롯을 찾을 수 없습니다: {}", key(&t.slot))))?;
+        let slot = self.m.slots.iter().find(|s| s.name == t.slot).ok_or_else(|| format_err(format!("슬롯을 찾을 수 없습니다: {}", key(&t.slot))))?;
         let two = slot.dark.is_some();
         let mut output = Vec::with_capacity(t.keys.len());
         for (i, k) in t.keys.iter().enumerate() {
@@ -1278,7 +1499,7 @@ impl<'a> Writer<'a> {
                 channels = 4;
             }
             let kinds = vec![Pos; channels];
-            put_curve(&mut o, self.curve_of(&t.keys, i, &kinds));
+            self.put_curve(&mut o, self.curve_of(&t.keys, i, &kinds));
             output.push(J::Map(o));
         }
         Ok((output, if two { "rgba2" } else { "rgba" }))
@@ -1314,7 +1535,7 @@ impl<'a> Writer<'a> {
             if v[2] != 0.0 {
                 o.set("stretch", J::Bool(true));
             }
-            put_curve(&mut o, self.curve_of(&t.keys, i, &[Mix, Pos]));
+            self.put_curve(&mut o, self.curve_of(&t.keys, i, &[Mix, Pos]));
             output.push(J::Map(o));
         }
         Ok(output)
@@ -1326,8 +1547,12 @@ impl<'a> Writer<'a> {
         for (i, k) in t.keys.iter().enumerate() {
             let mut o = self.key_base(k);
             let used = self.transform_used(t, values(k))?;
-            self.mixes(&mut o, &used, true);
-            put_curve(&mut o, self.curve_of(&t.keys, i, &kinds));
+            if self.v38 {
+                self.mixes38(&mut o, &used, key(&t.constraint));
+            } else {
+                self.mixes(&mut o, &used, true);
+            }
+            self.put_curve(&mut o, self.curve_of(&t.keys, i, &kinds));
             output.push(J::Map(o));
         }
         Ok(output)
@@ -1384,7 +1609,7 @@ impl<'a> Writer<'a> {
                 let values: Vec<J> = (start as usize..end as usize).map(|j| self.n(vec[j], Deform)).collect();
                 o.set("vertices", J::List(values));
             }
-            put_curve(&mut o, self.curve_of(&t.keys, i, &[Pos]));
+            self.put_curve(&mut o, self.curve_of(&t.keys, i, &[Pos]));
             output.push(J::Map(o));
         }
         Ok(output)
@@ -1402,12 +1627,7 @@ impl<'a> Writer<'a> {
                 }
             }
         }
-        Err(SpineError::Format(format!(
-            "첨부를 찾을 수 없습니다: {}/{}/{}",
-            key(&t.skin),
-            key(&t.slot),
-            key(&t.attachment)
-        )))
+        Err(SpineError::Format(format!("첨부를 찾을 수 없습니다: {}/{}/{}", key(&t.skin), key(&t.slot), key(&t.attachment))))
     }
 
     fn draw_keys(&self, t: &ModelTimeline) -> SpineResult<Vec<J>> {
@@ -1421,9 +1641,7 @@ impl<'a> Writer<'a> {
             let offsets = k.offsets.as_deref().unwrap_or(&[]);
             let mut changed: Vec<(usize, &(String, i64))> = Vec::with_capacity(offsets.len());
             for r in offsets {
-                let at = *index
-                    .get(r.0.as_str())
-                    .ok_or_else(|| format_err(format!("슬롯을 찾을 수 없습니다: {}", r.0)))?;
+                let at = *index.get(r.0.as_str()).ok_or_else(|| format_err(format!("슬롯을 찾을 수 없습니다: {}", r.0)))?;
                 changed.push((at, r));
             }
             changed.sort_by_key(|(at, _)| *at);
@@ -1450,12 +1668,7 @@ impl<'a> Writer<'a> {
             let mut o = self.key_base(k);
             let e = k.event.as_ref().ok_or_else(|| format_err("이벤트 키에 값이 없습니다".to_string()))?;
             o.set("name", J::opt(&e.name));
-            let data = self
-                .m
-                .events
-                .iter()
-                .find(|d| d.name == e.name)
-                .ok_or_else(|| format_err(format!("이벤트를 찾을 수 없습니다: {}", key(&e.name))))?;
+            let data = self.m.events.iter().find(|d| d.name == e.name).ok_or_else(|| format_err(format!("이벤트를 찾을 수 없습니다: {}", key(&e.name))))?;
             if e.int != data.int {
                 o.set("int", J::Int(e.int));
             }

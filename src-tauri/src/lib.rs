@@ -1,11 +1,15 @@
-//! Spine Faster Export — Tauri 백엔드.
+//! Quick Spine — Tauri 백엔드.
 //!
 //! 프런트엔드가 부르는 명령:
 //! - `open_project(path)`: `.spine` 을 읽어 스켈레톤 목록을 돌려준다.
 //! - `export_skeletons(indices, outDir, options)`: 고른 스켈레톤을 병렬로 내보낸다(`export-progress` 이벤트).
 //! - `load_pack_settings(path)` / `save_pack_settings(path, settings)`: Spine `pack.json`(Texture Packer Settings).
 //! - `load_export_settings(path, options)` / `save_export_settings(path, options, input, output)`: Spine 내보내기 설정 JSON.
+//! - `project_export_settings(options)`: 열린 `.spine` 에 저장된 마지막 내보내기 설정(없으면 null).
 //! - `take_pending_open()`: 앱을 켤 때 파인더/탐색기에서 넘겨받은 파일.
+//! - `set_menu_language(lang)`: 메뉴 막대를 그 언어(`ko`/`en`)로 다시 만든다.
+//!
+//! 메뉴의 설정(맥: 앱 메뉴 > 설정…, 윈도우: 편집 > 환경설정…)을 누르면 `open-settings` 이벤트를 보낸다.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -13,7 +17,8 @@ use std::time::Instant;
 
 use serde::Serialize;
 use spine_export::{export_skeleton, AtlasSettings, ExportOptions, ExportReport, SpineProject};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 struct LoadedProject {
     path: PathBuf,
@@ -111,6 +116,7 @@ async fn export_skeletons(
     if !options.version.trim().is_empty() {
         spine_export::check_version(options.version.trim()).map_err(|e| e.to_string())?;
     }
+    let options = spine_export::options_for(&loaded.project, &options);
     let out = PathBuf::from(&out_dir);
     let start = Instant::now();
     let names = loaded.project.skeleton_names();
@@ -168,6 +174,7 @@ fn display_name(p: &Path) -> String {
 #[tauri::command]
 fn existing_outputs(indices: Vec<usize>, out_dir: String, options: ExportOptions, state: State<'_, AppState>) -> Result<Vec<String>, String> {
     let loaded = current(&state)?;
+    let options = spine_export::options_for(&loaded.project, &options);
     let names = loaded.project.skeleton_names();
     let out = PathBuf::from(&out_dir);
     if !out.is_dir() {
@@ -208,6 +215,35 @@ fn load_export_settings(path: String, options: ExportOptions) -> Result<spine_ex
     spine_export::import_spine_settings(&text, &options).map_err(|e| e.to_string())
 }
 
+/// 열린 프로젝트에 저장된 마지막 내보내기 설정(Spine 에서 마지막으로 쓴 JSON · 바이너리 설정)을 지금 설정 위에 덮는다.
+/// 저장된 설정이 없으면 None. 출력 폴더는 프로젝트 폴더 기준으로 풀고, 다른 OS 의 경로(예: 맥에서 `E:/…`)면 버린다.
+#[tauri::command]
+fn project_export_settings(options: ExportOptions, state: State<'_, AppState>) -> Result<Option<spine_export::ImportedSettings>, String> {
+    let loaded = current(&state)?;
+    let Some(result) = spine_export::project_export_settings(&loaded.project, &options) else { return Ok(None) };
+    let mut got = result.map_err(|e| e.to_string())?;
+    if let Some(out) = got.output.take() {
+        match resolve_output(&loaded.path, &out) {
+            Some(p) => got.output = Some(p),
+            None => got.notes.push(format!("설정에 적힌 출력 폴더 «{out}» 는 이 컴퓨터의 경로가 아니라 쓰지 않았습니다.")),
+        }
+    }
+    Ok(Some(got))
+}
+
+/// Spine 이 적은 출력 폴더 → 이 컴퓨터의 절대 경로. 상대 경로는 프로젝트 폴더 기준. 다른 OS 의 절대 경로면 None.
+fn resolve_output(project: &Path, out: &str) -> Option<String> {
+    let b = out.as_bytes();
+    let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
+    let foreign = if cfg!(windows) { out.starts_with('/') && !out.starts_with("//") } else { drive || out.starts_with('\\') };
+    if foreign {
+        return None;
+    }
+    let p = Path::new(out);
+    let full = if p.is_absolute() { p.to_path_buf() } else { project.parent().unwrap_or(Path::new(".")).join(p) };
+    Some(full.display().to_string())
+}
+
 /// 지금 설정을 Spine 의 내보내기 설정 JSON 으로 저장한다(Spine 의 Load · CLI `--export` 로 읽을 수 있다).
 #[tauri::command]
 fn save_export_settings(path: String, options: ExportOptions, input: Option<String>, output: Option<String>) -> Result<(), String> {
@@ -240,6 +276,132 @@ fn args_paths(args: &[String]) -> Vec<String> {
     args.iter().skip(1).filter(|a| !a.starts_with('-')).cloned().collect()
 }
 
+// ───────────────────────────────────────── 메뉴
+
+/// 메뉴 문구(언어별). 앱 화면의 문구는 프런트엔드(`src/i18n.ts`)가 맡는다.
+/// 맥 전용 항목(앱·윈도우 메뉴)은 다른 OS 에서 쓰이지 않는다.
+#[allow(dead_code)]
+struct MenuText {
+    edit: &'static str,
+    settings: &'static str,
+    undo: &'static str,
+    redo: &'static str,
+    cut: &'static str,
+    copy: &'static str,
+    paste: &'static str,
+    select_all: &'static str,
+    window: &'static str,
+    minimize: &'static str,
+    zoom: &'static str,
+    close: &'static str,
+    about: &'static str,
+    services: &'static str,
+    hide: &'static str,
+    hide_others: &'static str,
+    show_all: &'static str,
+    quit: &'static str,
+}
+
+const MENU_KO: MenuText = MenuText {
+    edit: "편집",
+    settings: if cfg!(target_os = "macos") { "설정…" } else { "환경설정…" },
+    undo: "실행 취소",
+    redo: "다시 실행",
+    cut: "오려두기",
+    copy: "복사하기",
+    paste: "붙여넣기",
+    select_all: "모두 선택",
+    window: "윈도우",
+    minimize: "최소화",
+    zoom: "확대/축소",
+    close: "윈도우 닫기",
+    about: "Quick Spine 정보",
+    services: "서비스",
+    hide: "Quick Spine 가리기",
+    hide_others: "기타 가리기",
+    show_all: "모두 보기",
+    quit: "Quick Spine 종료",
+};
+
+const MENU_EN: MenuText = MenuText {
+    edit: "Edit",
+    settings: if cfg!(target_os = "macos") { "Settings…" } else { "Preferences…" },
+    undo: "Undo",
+    redo: "Redo",
+    cut: "Cut",
+    copy: "Copy",
+    paste: "Paste",
+    select_all: "Select All",
+    window: "Window",
+    minimize: "Minimize",
+    zoom: "Zoom",
+    close: "Close Window",
+    about: "About Quick Spine",
+    services: "Services",
+    hide: "Hide Quick Spine",
+    hide_others: "Hide Others",
+    show_all: "Show All",
+    quit: "Quit Quick Spine",
+};
+
+/// 메뉴 막대. 맥은 앱 메뉴에 «설정…»(⌘,), 윈도우·리눅스는 «편집» 메뉴에 «환경설정…»(Ctrl+,).
+fn build_menu<R: Runtime, M: Manager<R>>(app: &M, lang: &str) -> tauri::Result<Menu<R>> {
+    let t = if lang == "en" { &MENU_EN } else { &MENU_KO };
+    let settings = MenuItemBuilder::with_id("settings", t.settings).accelerator("CmdOrCtrl+,").build(app)?;
+    #[cfg(target_os = "macos")]
+    {
+        let app_menu = SubmenuBuilder::new(app, "Quick Spine")
+            .about_with_text(t.about, None)
+            .separator()
+            .item(&settings)
+            .separator()
+            .services_with_text(t.services)
+            .separator()
+            .hide_with_text(t.hide)
+            .hide_others_with_text(t.hide_others)
+            .show_all_with_text(t.show_all)
+            .separator()
+            .quit_with_text(t.quit)
+            .build()?;
+        // 기본 메뉴를 대체하므로, 입력칸의 ⌘C·⌘V 등이 계속 되도록 편집 메뉴를 둔다
+        let edit = SubmenuBuilder::new(app, t.edit)
+            .undo_with_text(t.undo)
+            .redo_with_text(t.redo)
+            .separator()
+            .cut_with_text(t.cut)
+            .copy_with_text(t.copy)
+            .paste_with_text(t.paste)
+            .select_all_with_text(t.select_all)
+            .build()?;
+        let window = SubmenuBuilder::new(app, t.window)
+            .minimize_with_text(t.minimize)
+            .maximize_with_text(t.zoom)
+            .separator()
+            .close_window_with_text(t.close)
+            .build()?;
+        MenuBuilder::new(app).items(&[&app_menu, &edit, &window]).build()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let edit = SubmenuBuilder::new(app, t.edit)
+            .cut_with_text(t.cut)
+            .copy_with_text(t.copy)
+            .paste_with_text(t.paste)
+            .select_all_with_text(t.select_all)
+            .separator()
+            .item(&settings)
+            .build()?;
+        MenuBuilder::new(app).items(&[&edit]).build()
+    }
+}
+
+#[tauri::command]
+fn set_menu_language(app: AppHandle, lang: String) -> Result<(), String> {
+    let menu = build_menu(&app, &lang).map_err(|e| e.to_string())?;
+    app.set_menu(menu).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[allow(unused_mut)]
@@ -254,6 +416,12 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
+        .menu(|app| build_menu(app, "ko"))
+        .on_menu_event(|app, event| {
+            if event.id() == "settings" {
+                let _ = app.emit("open-settings", ());
+            }
+        })
         .setup(|app| {
             // 윈도우: 연결된 파일은 명령줄 인수로 들어온다.
             let initial = args_paths(&std::env::args().collect::<Vec<_>>());
@@ -262,7 +430,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![open_project, close_project, export_skeletons, existing_outputs, load_pack_settings, save_pack_settings, load_export_settings, save_export_settings, take_pending_open])
+        .invoke_handler(tauri::generate_handler![open_project, close_project, export_skeletons, existing_outputs, load_pack_settings, save_pack_settings, load_export_settings, save_export_settings, project_export_settings, take_pending_open, set_menu_language])
         .build(tauri::generate_context!())
         .expect("Tauri 앱을 만들 수 없습니다")
         .run(|_app, _event| {

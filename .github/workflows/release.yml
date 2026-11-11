@@ -34,5 +34,5 @@ jobs:
         with:
           args: --target ${{ matrix.target }}
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-          releaseName: "Spine Faster Export ${{ github.ref_name }}"
+          releaseName: "Quick Spine ${{ github.ref_name }}"
           releaseDraft: true

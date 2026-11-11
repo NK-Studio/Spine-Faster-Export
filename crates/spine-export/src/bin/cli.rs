@@ -124,6 +124,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let opts = spine_export::options_for(&project, &opts);
     let names = project.skeleton_names();
     let indices: Vec<usize> = match &skeleton {
         Some(s) => match names.iter().position(|n| n == s) {

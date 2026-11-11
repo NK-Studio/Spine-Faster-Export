@@ -1,6 +1,8 @@
 // 공용 컨트롤: 슬라이더 칸(숫자칸 + 막대), 셀렉트(자체 펼침 목록), 묶음 버튼 키보드 이동.
 // 디자인 시트 5.3(입력칸)·6(상태 규칙)을 따른다.
 
+import { t } from "./i18n";
+
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 
 // ───────────────────────────────────────── 셀렉트
@@ -80,7 +82,7 @@ function showList(sel: HTMLSelectElement) {
     .map(
       (o, i) =>
         `<div class="dd-item${o.disabled ? " disabled" : ""}${o.hasAttribute("data-default") ? " default" : ""}" role="option" data-i="${i}" aria-selected="${i === sel.selectedIndex}">` +
-        `<span class="t">${esc(o.textContent ?? "")}</span>${o.hasAttribute("data-default") ? '<span class="hint">기본값</span>' : ""}</div>`,
+        `<span class="t">${esc(o.textContent ?? "")}</span>${o.hasAttribute("data-default") ? `<span class="hint">${t("기본값")}</span>` : ""}</div>`,
     )
     .join("");
   document.body.appendChild(pop);
@@ -254,7 +256,7 @@ export function mountSlider(labelHost: HTMLElement, fieldHost: HTMLElement, o: S
   let value = o.value;
   labelHost.className = "lbl scrub";
   labelHost.textContent = `${o.label}:`;
-  if (o.tip) labelHost.title = `${o.tip}\n(좌우로 끌어 값 바꾸기)`;
+  if (o.tip) labelHost.title = `${o.tip}\n${t("(좌우로 끌어 값 바꾸기)")}`;
   fieldHost.className = "slider";
   if (o.tip) fieldHost.title = o.tip;
   fieldHost.innerHTML = `
@@ -279,8 +281,8 @@ export function mountSlider(labelHost: HTMLElement, fieldHost: HTMLElement, o: S
     let i = 0;
     while (v > s[i + 1]) i++;
     const a = s[i] || 1;
-    const t = s[i] === 0 ? (v - s[i]) / (s[i + 1] - s[i]) : Math.log(v / a) / Math.log(s[i + 1] / a);
-    return (i + t) / (s.length - 1);
+    const frac = s[i] === 0 ? (v - s[i]) / (s[i + 1] - s[i]) : Math.log(v / a) / Math.log(s[i + 1] / a);
+    return (i + frac) / (s.length - 1);
   };
   const fromPos = (p: number): number => {
     p = Math.max(0, Math.min(1, p));

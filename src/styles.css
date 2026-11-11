@@ -11,6 +11,8 @@
   --bar-gap: 8px;
   --ctl-h: 22px;
 }
+/* 맥: 시스템 UI 글꼴(영문 SF Pro, 한글 Apple SD Gothic Neo) */
+:root.mac { --font: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif; }
 
 :root[data-theme="dark"] {
   /* JetBrains Islands Dark(설정 대화상자)에서 뽑은 색: 바탕은 한 겹으로 평평하게, 콤보만 채우고 입력칸·버튼은 테두리만 */
@@ -326,6 +328,8 @@ select.field option { background: var(--git-menu-bg); color: var(--git-text); }
 
 .input-row { display: flex; align-items: center; gap: 6px; }
 .input-row .path-box { flex: 1; }
+.input-row .proj-path { flex: 1; min-width: 0; }
+.out-path { flex: 1; min-width: 0; }
 .lbl { font-size: 12px; color: var(--git-text); white-space: nowrap; }
 .lbl.off { opacity: 0.5; }
 .ph { color: var(--git-text-muted); font-family: var(--font); }
@@ -379,10 +383,6 @@ select.field option { background: var(--git-menu-bg); color: var(--git-text); }
 .tabs button.on { background: var(--git-chip-on-bg); border-color: var(--git-chip-on-border); color: var(--git-text-strong); font-weight: 600; }
 .tabs button:focus-visible { outline: none; border-color: var(--git-accent); box-shadow: 0 0 0 1px var(--git-accent); }
 .tabs .warn-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--git-warning); flex: none; }
-.tabs .off-tag {
-  font-size: 10.5px; font-weight: 500; line-height: 15px; padding: 0 4px; border-radius: var(--radius-small);
-  color: var(--git-text-muted); border: 1px solid var(--git-border);
-}
 .tab-pane { flex: 1; min-height: 0; overflow: auto; padding: 18px 20px; }
 .tab-pane[hidden] { display: none; }
 /* 한 열 양식: 오른쪽 맞춤 라벨 + 컨트롤(Islands 설정 화면처럼) */
@@ -445,6 +445,16 @@ select.field option { background: var(--git-menu-bg); color: var(--git-text); }
 .drop-card .t { font-size: 15px; font-weight: 700; color: var(--git-text-strong); }
 .drop-card .s { font-size: 12px; color: var(--git-text-muted); margin-top: 4px; }
 .drop-card.bad { border-color: var(--git-warning); }
+
+/* ── 툴팁(src/tooltip.ts) ───────────────────────────── */
+.tooltip {
+  position: fixed; z-index: 100; display: none; max-width: 360px; padding: 5px 9px; border-radius: 6px; pointer-events: none;
+  background: var(--git-menu-bg); border: 1px solid var(--git-menu-border); box-shadow: 0 6px 18px var(--git-menu-shadow);
+  color: var(--git-text-strong); font-size: 12px; line-height: 1.4; white-space: pre-line; overflow-wrap: anywhere;
+  opacity: 0; transform: translateY(-3px); transition: opacity 120ms ease, transform 120ms ease;
+}
+.tooltip.above { transform: translateY(3px); }
+.tooltip.on { opacity: 1; transform: none; }
 
 /* ── 토스트 ───────────────────────────────────────── */
 .toasts { position: fixed; left: 50%; bottom: 36px; transform: translateX(-50%); z-index: 50; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
@@ -660,3 +670,27 @@ input:disabled, textarea:disabled, .no-project .field-with-icon { cursor: defaul
 
 /* Spine 내보내기 대화상자처럼: [팩] [소스] ~ [타깃] */
 .row > .tilde { color: var(--git-text-muted, currentColor); opacity: 0.7; padding: 0 2px; }
+
+/* ── 앱 설정 창(메뉴 › 설정…) ─────────────────────── */
+.modal.settings-modal { width: 720px; max-width: calc(100vw - 32px); height: min(460px, calc(100vh - 32px)); max-height: none; outline: none; }
+.settings-modal .m-head { padding: 16px 20px 12px; }
+.set-wrap { flex: 1; min-height: 0; display: grid; grid-template-columns: 168px minmax(0, 1fr); gap: 20px; padding: 0 20px 16px; }
+.set-nav { display: flex; flex-direction: column; gap: 2px; overflow: auto; }
+.set-nav button {
+  flex: none; height: 32px; border: 0; border-radius: var(--radius); background: transparent; color: var(--git-text); text-align: left; padding: 0 12px; font: inherit;
+}
+.set-nav button:hover:not(.on) { background: var(--git-hover); }
+.set-nav button.on { background: var(--git-selected); color: var(--git-selected-text); font-weight: 600; }
+.set-nav button:focus-visible { outline: none; box-shadow: 0 0 0 1px var(--git-accent); }
+/* 포커스 테두리(바깥 1px)가 잘리지 않게 2px 여유를 두고 그만큼 당긴다 */
+.set-pane { display: flex; flex-direction: column; gap: 18px; overflow: auto; min-width: 0; padding: 0 2px 2px; margin: 0 -2px; }
+/* 제목 줄은 왼쪽 목록 첫 항목과 같은 높이(32px) — 두 «일반» 글자가 한 줄에 놓인다 */
+.set-title {
+  flex: none; height: 32px; display: flex; align-items: center; font-size: 15px; font-weight: 700; color: var(--git-text-strong);
+  border-bottom: 1px solid var(--git-dialog-divider); margin-bottom: -4px;
+}
+.set-field { display: flex; flex-direction: column; gap: 8px; }
+.set-lbl { font-weight: 600; color: var(--git-text-strong); line-height: 1.3; }
+.set-field .select > .select-btn { height: 32px; padding: 0 30px 0 10px; font-size: var(--base-size); }
+.set-field .select::after { right: 10px; }
+.set-field .hint { margin-top: -2px; }

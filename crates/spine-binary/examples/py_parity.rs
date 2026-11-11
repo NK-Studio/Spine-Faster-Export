@@ -144,6 +144,7 @@ fn key(k: &Value) -> ModelKey {
                 })
                 .collect()
         }),
+        ..Default::default()
     }
 }
 

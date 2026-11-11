@@ -1,7 +1,7 @@
 //! 손으로 만든 모델로 시험한다.
 
 use super::*;
-use spine_model::{ModelAttachment, ModelSequence, ModelSkin, ModelSkinEntry};
+use spine_model::{AtlasOutput, ModelAttachment, ModelSequence, ModelSkin, ModelSkinEntry};
 use std::path::PathBuf;
 
 fn att(kind: &str, name: &str, path: &str) -> ModelSkinEntry {
@@ -308,7 +308,7 @@ fn duplicate_padding_copies_edges() {
     let px = |x: usize, y: usize| (y * 6 + x) * 4;
     out[px(2, 1)..px(2, 1) + 4].copy_from_slice(&[9, 8, 7, 255]);
     out[px(3, 2)..px(3, 2) + 4].copy_from_slice(&[1, 2, 3, 255]);
-    duplicate_edges(&mut out, 6, 4, (2, 1, 2, 2), 1, 1);
+    duplicate_edges(&mut out, 6, 4, (2, 1, 2, 2), 1, 1, None);
     assert_eq!(&out[px(1, 1)..px(1, 1) + 4], &[9, 8, 7, 255]); // 왼쪽
     assert_eq!(&out[px(1, 0)..px(1, 0) + 4], &[9, 8, 7, 255]); // 왼쪽 위 모서리
     assert_eq!(&out[px(4, 3)..px(4, 3) + 4], &[1, 2, 3, 255]); // 오른쪽 아래 모서리
@@ -328,4 +328,320 @@ fn spine_pack_json() {
     assert_eq!(s.bleed_iterations, 2);
     let back = serde_json::to_string(&s).unwrap();
     assert!(back.contains("\"premultiplyAlpha\":true") && back.contains("\"maxWidth\":1024"));
+}
+
+fn mesh_att(name: &str, uvs: &[f64], triangles: &[i64]) -> ModelSkinEntry {
+    let mut e = att("mesh", name, "");
+    let a = e.attachment.as_mut().unwrap();
+    a.uvs = Some(uvs.to_vec());
+    a.triangles = Some(triangles.to_vec());
+    a.hull = (uvs.len() / 2) as i32;
+    e
+}
+
+/// 영역의 원본 좌표 (x, y)(잘라내기 전)가 페이지의 어디인가. 잘려 나간 곳이면 None.
+fn page_spot(out: &AtlasOutput, name: &str, x: i32, y: i32) -> Option<(i32, i32)> {
+    let lines: Vec<&str> = out.atlas_text.lines().collect();
+    let at = lines.iter().position(|l| *l == name).unwrap();
+    let field = |key: &str| -> Option<Vec<i32>> {
+        lines[at + 1..].iter().take_while(|l| l.contains(':')).find_map(|l| l.strip_prefix(key)).map(|v| v.split(',').map(|n| n.parse().unwrap()).collect())
+    };
+    let b = field("bounds:").unwrap();
+    let (left, top) = match field("offsets:") {
+        Some(o) => (o[0], o[3] - o[1] - b[3]),
+        None => (0, 0),
+    };
+    let deg = field("rotate:").map_or(0, |v| v[0]);
+    let (lx, ly) = (x - left, y - top);
+    if lx < 0 || ly < 0 || lx >= b[2] || ly >= b[3] {
+        return None;
+    }
+    // 런타임(MeshAttachment.updateRegion)이 rotate 를 읽는 규칙
+    Some(match deg {
+        90 => (b[0] + ly, b[1] + b[2] - 1 - lx),
+        180 => (b[0] + b[2] - 1 - lx, b[1] + b[3] - 1 - ly),
+        270 => (b[0] + b[3] - 1 - ly, b[1] + lx),
+        _ => (b[0] + lx, b[1] + ly),
+    })
+}
+
+/// 페이지에서 영역의 원본 좌표 (x, y)(잘라내기 전) 픽셀을 꺼낸다.
+fn page_pixel(out: &AtlasOutput, name: &str, x: i32, y: i32) -> [u8; 4] {
+    let (px, py) = page_spot(out, name, x, y).unwrap_or_else(|| panic!("{name} ({x},{y}) 가 영역 밖"));
+    let page = &out.pages[0];
+    let d = (py as usize * page.width as usize + px as usize) * 4;
+    page.rgba[d..d + 4].try_into().unwrap()
+}
+
+#[test]
+fn polygons_pack_mesh_shapes() {
+    let dir = temp_dir("poly");
+    let n = 100usize;
+    let imgs: Vec<Vec<u8>> = (0..5).map(|i| image(n, n, 0, 10 + i as u8)).collect();
+    for (i, px) in imgs.iter().enumerate() {
+        write(&dir, &format!("t{i}"), n as u32, n as u32, px);
+    }
+    // t0·t2: 왼쪽 위 삼각형, t1: 오른쪽 아래 삼각형, t3: 왼쪽 위 삼각형이지만 영역 첨부도 쓴다 → 사각형, t4: 영역 첨부
+    let ul = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+    let lr = [1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+    let shapes = [Some(ul), Some(lr), Some(ul), None, None];
+    let m = model(vec![
+        mesh_att("t0", &ul, &[0, 1, 2]),
+        mesh_att("t1", &lr, &[0, 1, 2]),
+        mesh_att("t2", &ul, &[0, 1, 2]),
+        mesh_att("t3", &ul, &[0, 1, 2]),
+        att("region", "t3b", "t3"),
+        att("region", "t4", ""),
+    ]);
+    let rect = AtlasSettings { pma: false, ..AtlasSettings::default() };
+    let a = pack(&m, &dir, "r", &rect).unwrap();
+    let area = |o: &AtlasOutput| o.pages.iter().map(|p| p.width as u64 * p.height as u64).sum::<u64>();
+
+    for duplicate_padding in [false, true] {
+        let poly = AtlasSettings { packing: "polygons".into(), duplicate_padding, ..rect.clone() };
+        let b = pack(&m, &dir, "p", &poly).unwrap();
+        assert_eq!(b.pages.len(), 1);
+        assert!(area(&b) * 10 < area(&a) * 9, "다각형 {} · 직사각형 {}", area(&b), area(&a));
+        let page = &b.pages[0];
+        let (pw, ph) = (page.width as i32, page.height as i32);
+
+        // 메시가 걸친 픽셀(사각형 영역은 전체)은 그대로 있고, 영역끼리 겹치지 않는다
+        let hulls: Vec<Vec<u8>> = shapes.iter().map(|t| t.and_then(|t| polygon::raster_tris(n, n, &[t])).unwrap_or_else(|| vec![1; n * n])).collect();
+        let mut label = vec![0u8; (pw * ph) as usize];
+        for (i, hull) in hulls.iter().enumerate() {
+            let name = format!("t{i}");
+            for y in 0..n {
+                for x in (0..n).filter(|&x| hull[y * n + x] != 0) {
+                    let s = (y * n + x) * 4;
+                    assert_eq!(page_pixel(&b, &name, x as i32, y as i32), imgs[i][s..s + 4], "{name} ({x},{y})");
+                    let (px, py) = page_spot(&b, &name, x as i32, y as i32).unwrap();
+                    let at = &mut label[(py * pw + px) as usize];
+                    assert_eq!(*at, 0, "{name} ({x},{y}) 가 다른 영역과 겹친다");
+                    *at = i as u8 + 1;
+                }
+            }
+        }
+
+        // 여백(2): 사각형끼리는 빈 픽셀 2줄 이상, 모양이 낀 쌍은 1줄 이상
+        for y in 0..ph {
+            for x in 0..pw {
+                let me = label[(y * pw + x) as usize];
+                if me == 0 {
+                    continue;
+                }
+                for ny in (y - 2).max(0)..=(y + 2).min(ph - 1) {
+                    for nx in (x - 2).max(0)..=(x + 2).min(pw - 1) {
+                        let other = label[(ny * pw + nx) as usize];
+                        if other == 0 || other == me {
+                            continue;
+                        }
+                        let shape = shapes[me as usize - 1].is_some() || shapes[other as usize - 1].is_some();
+                        let far = (nx - x).abs().max((ny - y).abs()) == 2;
+                        assert!(shape && far, "영역 {me} ({x},{y}) 와 영역 {other} ({nx},{ny}) 가 여백보다 가깝다");
+                    }
+                }
+            }
+        }
+
+        // 모양 바깥 한 줄(선형 필터가 읽는 줄)은 제 픽셀이거나 비어 있다: 남의 픽셀(다른 모양의 바깥 줄 · duplicate padding)이 아니다
+        let mut own = 0;
+        for (i, hull) in hulls.iter().enumerate().filter(|(i, _)| shapes[*i].is_some()) {
+            let wide = polygon::widen(hull, n, n, 1);
+            for y in 0..n {
+                for x in (0..n).filter(|&x| wide[y * n + x] != 0 && hull[y * n + x] == 0) {
+                    let got = page_pixel(&b, &format!("t{i}"), x as i32, y as i32);
+                    let s = (y * n + x) * 4;
+                    if got == imgs[i][s..s + 4] {
+                        own += 1;
+                    } else {
+                        assert_eq!(got, [0; 4], "t{i} ({x},{y}) 바깥 줄에 남의 픽셀");
+                    }
+                }
+            }
+        }
+        assert!(own > 0);
+
+        // 두 영역의 바깥 한 줄이 만나는 빈 픽셀은 비어 있어야 한다(둘 다 읽으므로 어느 쪽 픽셀도 두지 않는다)
+        let mut shared = 0;
+        for y in 0..ph {
+            for x in 0..pw {
+                if label[(y * pw + x) as usize] != 0 {
+                    continue;
+                }
+                let mut near: Vec<u8> = Vec::new();
+                for ny in (y - 1).max(0)..=(y + 1).min(ph - 1) {
+                    for nx in (x - 1).max(0)..=(x + 1).min(pw - 1) {
+                        let l = label[(ny * pw + nx) as usize];
+                        if l != 0 && !near.contains(&l) {
+                            near.push(l);
+                        }
+                    }
+                }
+                if near.len() >= 2 {
+                    shared += 1;
+                    let d = ((y * pw + x) * 4) as usize;
+                    assert_eq!(page.rgba[d..d + 4], [0; 4], "({x},{y}) 는 영역 {near:?} 가 함께 읽는 픽셀인데 비어 있지 않다");
+                }
+            }
+        }
+        assert!(shared > 0, "모양이 빈 픽셀 한 줄까지 붙은 곳이 없다");
+    }
+
+    // 모르는 packing 이름은 직사각형과 같다
+    let other = pack(&m, &dir, "r", &AtlasSettings { packing: "rectangles".into(), ..rect.clone() }).unwrap();
+    assert_eq!(other.atlas_text, a.atlas_text);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn polygon_shapes_from_model() {
+    let quad = [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+    let mut linked = att("linkedmesh", "child", "img/child");
+    linked.attachment.as_mut().unwrap().parent = Some("parent".into());
+    let mut lost = att("linkedmesh", "lost", "img/lost");
+    lost.attachment.as_mut().unwrap().parent = Some("nope".into());
+    let m = model(vec![
+        mesh_att("parent", &quad, &[0, 1, 2, 2, 3, 0]),
+        linked,
+        lost,
+        mesh_att("both", &quad, &[0, 1, 2]),
+        att("region", "both2", "both"),
+        mesh_att("bad", &quad, &[0, 1, 9]),
+    ]);
+    let shapes = mesh_shapes(&m);
+    assert_eq!(shapes["parent"].len(), 2);
+    assert_eq!(shapes["img/child"], shapes["parent"]);
+    assert!(!shapes.contains_key("img/lost") && !shapes.contains_key("both") && !shapes.contains_key("bad"));
+
+    // 이미지 전체를 덮는 메시는 사각형으로, 일부만 덮으면 모양으로
+    assert!(polygon::raster_tris(8, 8, &shapes["parent"]).is_none());
+    let half = polygon::raster_tris(8, 8, &[[0.0, 0.0, 0.5, 0.0, 0.0, 0.5]]).unwrap();
+    assert_eq!(polygon::mask_bounds(&half, 8, 8), Some((0, 0, 3, 3)));
+    assert!(half[0] == 1 && half[3 * 8 + 3] == 0 && half[4] == 0);
+}
+
+/// spine-csharp 3.8 `Atlas.Load` 를 그대로 옮긴 파서: 키 이름을 보지 않고 줄을 정해진 순서로만 읽는다.
+/// (페이지 이름, 폭, 높이, [(영역 이름, rotate 값, x, y, w, h, orig w, orig h, offset x, offset y, index)])
+#[allow(clippy::type_complexity)]
+fn parse_like_38(text: &str) -> Vec<(String, i32, i32, Vec<(String, String, i32, i32, i32, i32, i32, i32, i32, i32, i32)>)> {
+    const FORMATS: [&str; 7] = ["Alpha", "Intensity", "LuminanceAlpha", "RGB565", "RGBA4444", "RGB888", "RGBA8888"];
+    const FILTERS: [&str; 7] = ["Nearest", "Linear", "MipMap", "MipMapNearestNearest", "MipMapLinearNearest", "MipMapNearestLinear", "MipMapLinearLinear"];
+    fn tuple(line: &str) -> Vec<String> {
+        let colon = line.find(':').unwrap_or_else(|| panic!("Invalid line: {line}"));
+        let mut out = Vec::new();
+        let mut last = colon + 1;
+        for _ in 0..3 {
+            let Some(comma) = line[last..].find(',') else { break };
+            out.push(line[last..last + comma].trim().to_string());
+            last += comma + 1;
+        }
+        out.push(line[last..].trim().to_string());
+        out
+    }
+    let value = |line: &str| line[line.find(':').unwrap_or_else(|| panic!("Invalid line: {line}")) + 1..].trim().to_string();
+    let int = |s: &str| s.parse::<i32>().unwrap_or_else(|_| panic!("숫자가 아님: {s}"));
+    let mut lines = text.lines();
+    let mut pages = Vec::new();
+    let mut in_page = false;
+    while let Some(line) = lines.next() {
+        if line.trim().is_empty() {
+            in_page = false;
+        } else if !in_page {
+            let mut t = tuple(lines.next().unwrap());
+            assert_eq!(t.len(), 2, "size 줄이 아님");
+            let (w, h) = (int(&t[0]), int(&t[1]));
+            t = tuple(lines.next().unwrap());
+            assert!(FORMATS.contains(&t[0].as_str()), "format 이 아님: {}", t[0]);
+            t = tuple(lines.next().unwrap());
+            assert!(t.len() == 2 && FILTERS.contains(&t[0].as_str()) && FILTERS.contains(&t[1].as_str()), "filter 가 아님: {t:?}");
+            let repeat = value(lines.next().unwrap());
+            assert!(["x", "y", "xy", "none"].contains(&repeat.as_str()), "repeat 가 아님: {repeat}");
+            pages.push((line.to_string(), w, h, Vec::new()));
+            in_page = true;
+        } else {
+            let rotate = value(lines.next().unwrap());
+            assert!(rotate == "true" || rotate == "false" || rotate.parse::<i32>().is_ok(), "rotate 가 아님: {rotate}");
+            let xy = tuple(lines.next().unwrap());
+            let size = tuple(lines.next().unwrap());
+            let orig = tuple(lines.next().unwrap());
+            assert_eq!(orig.len(), 2, "split 은 쓰지 않는다");
+            let offset = tuple(lines.next().unwrap());
+            let index = int(&value(lines.next().unwrap()));
+            pages.last_mut().unwrap().3.push((
+                line.to_string(),
+                rotate,
+                int(&xy[0]),
+                int(&xy[1]),
+                int(&size[0]),
+                int(&size[1]),
+                int(&orig[0]),
+                int(&orig[1]),
+                int(&offset[0]),
+                int(&offset[1]),
+                index,
+            ));
+        }
+    }
+    pages
+}
+
+#[test]
+fn legacy_output_reads_like_38() {
+    let dir = temp_dir("legacy");
+    let mut entries = Vec::new();
+    let mut sources: HashMap<String, (usize, usize, usize, Vec<u8>)> = HashMap::new();
+    for i in 0..10usize {
+        let (w, h, b) = (40 + (i * 13) % 50, 30 + (i * 7) % 40, i % 3);
+        let px = image(w, h, b, i as u8 * 9);
+        write(&dir, &format!("part_{i}"), w as u32, h as u32, &px);
+        entries.push(att("region", &format!("part_{i}"), &format!("part_{i}")));
+        sources.insert(format!("part_{i}"), (w, h, b, px));
+    }
+    let m = model(entries);
+    let base = AtlasSettings { pma: false, use_indexes: true, wrap_x: TextureWrap::Repeat, ..AtlasSettings::default() }.with_max_size(128);
+    let new = pack(&m, &dir, "l", &base).unwrap();
+    let old = pack(&m, &dir, "l", &AtlasSettings { legacy_output: true, ..base.clone() }).unwrap();
+    assert!(old.pages.len() > 1, "여러 페이지를 시험해야 한다");
+    // 그림은 같고 글만 다르다
+    assert_eq!(old.pages.iter().map(|p| &p.rgba).collect::<Vec<_>>(), new.pages.iter().map(|p| &p.rgba).collect::<Vec<_>>());
+
+    let pages = parse_like_38(&old.atlas_text);
+    assert_eq!(pages.len(), old.pages.len());
+    let mut seen = 0;
+    for (p, (name, w, h, regions)) in pages.iter().enumerate() {
+        let page = &old.pages[p];
+        assert_eq!((name.as_str(), *w as u32, *h as u32), (page.name.as_str(), page.width, page.height));
+        for (rname, rotate, x, y, rw, rh, ow, oh, ox, oy, index) in regions {
+            // use_indexes: part_3 → 이름 part, index 3
+            assert_eq!(rname, "part");
+            let (sw, sh, b, px) = &sources[&format!("part_{index}")];
+            assert_eq!((*ow as usize, *oh as usize), (*sw, *sh));
+            assert_eq!((*rw as usize, *rh as usize), (sw - 2 * b, sh - 2 * b));
+            // offset 은 왼쪽 · 아래 기준
+            assert_eq!((*ox as usize, *oy as usize), (*b, *b));
+            let rot = rotate == "true";
+            assert!(rot || rotate == "false", "사각형 영역은 90도만 돈다: {rotate}");
+            let top = *oh - *oy - *rh;
+            for ly in 0..*rh {
+                for lx in 0..*rw {
+                    let s = (((ly + top) * *ow + lx + *ox) * 4) as usize;
+                    let (gx, gy) = if rot { (x + ly, y + rw - 1 - lx) } else { (x + lx, y + ly) };
+                    let d = ((gy * *w + gx) * 4) as usize;
+                    assert_eq!(page.rgba[d..d + 4], px[s..s + 4], "part_{index} ({lx},{ly})");
+                }
+            }
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, 10);
+    // Spine 3.8 편집기의 글자: 머리말의 쉼표 뒤에 빈칸이 없다. 나머지는 같고, 3.8 파서는 둘 다 같은 값으로 읽는다
+    let tight = pack(&m, &dir, "l", &AtlasSettings { legacy_output: true, legacy_editor38: true, ..base.clone() }).unwrap();
+    let first = &old.pages[0];
+    assert!(old.atlas_text.contains(&format!("size: {}, {}\n", first.width, first.height)) && old.atlas_text.contains("filter: Linear, Linear\n"));
+    assert!(tight.atlas_text.contains(&format!("size: {},{}\n", first.width, first.height)) && tight.atlas_text.contains("filter: Linear,Linear\n"));
+    assert_eq!(tight.atlas_text.replace(",", ", ").replace(",  ", ", "), old.atlas_text);
+    assert_eq!(parse_like_38(&tight.atlas_text), pages);
+    // 새 형식은 3.8 파서로 읽히지 않는다(머리말의 filter 줄을 format 으로 읽다가 멈춘다)
+    assert!(std::panic::catch_unwind(|| parse_like_38(&new.atlas_text)).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
 }

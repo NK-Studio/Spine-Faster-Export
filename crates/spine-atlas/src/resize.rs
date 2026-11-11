@@ -1,6 +1,6 @@
 //! 배율(Scale) 적용: RGBA 이미지를 늘리거나 줄인다.
 //!
-//! 미리 곱한 알파로 바꿔 가로·세로로 나눠 거르고(삼각 필터, 줄일 때는 넓혀 평균) 다시 되돌린다.
+//! 미리 곱한 알파로 바꿔 가로·세로로 나눠 거르고(줄일 때는 넓이 평균, 늘릴 때는 삼각 필터) 다시 되돌린다.
 //! 투명 픽셀의 색이 가장자리로 번지지 않는다.
 
 /// (새 폭, 새 높이, RGBA). 새 크기는 반올림, 최소 1.
@@ -59,6 +59,23 @@ pub fn resize(w: usize, h: usize, rgba: &[u8], scale: f32) -> (usize, usize, Vec
 /// 출력 칸마다 (원본 시작 칸, 정규화한 무게들).
 fn weights(src: usize, dst: usize) -> Vec<(usize, Vec<f32>)> {
     let ratio = src as f64 / dst as f64;
+    if ratio > 1.0 {
+        // 줄일 때: 출력 칸이 덮는 원본 구간의 넓이 평균(Spine 의 결과와 같다)
+        return (0..dst)
+            .map(|i| {
+                let (a, b) = (i as f64 * ratio, ((i + 1) as f64 * ratio).min(src as f64));
+                let lo = (a.floor() as usize).min(src - 1);
+                let hi = ((b.ceil() as usize).max(lo + 1) - 1).min(src - 1);
+                let ws: Vec<f32> = (lo..=hi).map(|j| (((j + 1) as f64).min(b) - (j as f64).max(a)).max(0.0) as f32).collect();
+                let sum: f32 = ws.iter().sum();
+                if sum > 0.0 {
+                    (lo, ws.iter().map(|w| w / sum).collect())
+                } else {
+                    (lo, vec![1.0])
+                }
+            })
+            .collect();
+    }
     let support = ratio.max(1.0);
     (0..dst)
         .map(|i| {

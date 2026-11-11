@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Spine Faster Export",
+  "productName": "Quick Spine",
   "version": "0.1.0",
   "identifier": "com.nkstudio.spine-faster-export",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Spine Faster Export",
+        "title": "Quick Spine",
         "width": 940,
         "height": 620,
         "minWidth": 820,

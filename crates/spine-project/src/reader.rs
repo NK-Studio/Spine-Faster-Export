@@ -190,8 +190,12 @@ pub struct Reader<'a> {
     slots: Vec<Option<NodeId>>,
     slot_index: HashMap<NodeId, usize>,
     skin_nodes: Vec<Option<NodeId>>,
+    /// 메시마다 그것을 부모로 삼는 linked mesh 수(부모가 linked mesh 면 그 뿌리 메시에 센다).
+    linked_children: HashMap<NodeId, usize>,
     /// Export 체크가 꺼진 첨부도 내보낸다(Spine «Export all»).
     export_all: bool,
+    /// 가중치 메시의 삼각형을 Spine 4.2 이하 편집기처럼 정렬한다(`sort_triangles`).
+    sort_triangles: bool,
 }
 
 /// 프로젝트의 스켈레톤 목록(이름, 노드). 없으면 오류.
@@ -229,8 +233,21 @@ impl<'a> Reader<'a> {
             slots: Vec::new(),
             slot_index: HashMap::new(),
             skin_nodes: Vec::new(),
+            linked_children: linked_children(p, g("MeshAtt")),
             export_all: false,
+            sort_triangles: !p.format.starts_with("4.3"),
         }
+    }
+
+    /// 내보낼 Spine 버전을 알려 준다. 4.3 이상으로 내보내는 것은 4.3 편집기뿐이고, 4.3 편집기는 옛 프로젝트를 열어도
+    /// 가중치 메시의 삼각형을 정렬하지 않는다(4.0 형식 그대로인 공식 4.3 예제의 내보내기와 대조).
+    pub fn target_version(mut self, version: &str) -> Self {
+        let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+        let target = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+        if target >= (4, 3) {
+            self.sort_triangles = false;
+        }
+        self
     }
 
     /// Export 체크가 꺼진 첨부도 내보낼지(Spine «Export all»).
@@ -876,6 +893,31 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
+    /// 가중치 메시의 삼각형을 Spine 이 내보내는 순서로 만든다.
+    ///
+    /// Spine 4.2 이하는 프로젝트를 열 때 가중치 메시마다 삼각형을 한 번 정렬하는데(`sort_triangles_once`), linked mesh 는
+    /// 부모와 삼각형 배열을 함께 써서 linked mesh 하나마다 같은 배열이 한 번 더 정렬된다. 정렬은 같은 뼈의 삼각형
+    /// 순서를 뒤집으므로, 결과는 "1 + linked mesh 수"가 홀수인지 짝수인지로 갈린다. 뼈가 하나뿐이면 정렬하지 않는다.
+    /// (공식 3.8 · 4.0 · 4.1 · 4.2 예제와 linked mesh 가 많은 4.2 프로젝트를 Spine 내보내기와 대조해 확인.)
+    fn sort_triangles(&self, an: NodeId, tri: &mut [i64]) -> R<()> {
+        let a = Some(an);
+        let bones = self.lst(a, 1).len();
+        // Spine 4.3 편집기는 저장된 순서 그대로 내보낸다(공식 4.3 예제와 대조).
+        if bones < 2 || !self.sort_triangles {
+            return Ok(());
+        }
+        let mut weights: Vec<Vec<f32>> = Vec::new();
+        for vw in self.lst(a, 2) {
+            let w = self.leaf_floats(vw, 0)?.ok_or_else(null_node)?;
+            weights.push((0..bones).map(|b| w.get(b).copied().unwrap_or(0.0) as f32).collect());
+        }
+        sort_triangles_once(tri, &weights);
+        if self.linked_children.get(&an).copied().unwrap_or(0) % 2 == 1 {
+            sort_triangles_once(tri, &weights);
+        }
+        Ok(())
+    }
+
     fn sequence(&self, q: Option<NodeId>) -> Option<ModelSequence> {
         q?;
         Some(ModelSequence {
@@ -936,12 +978,18 @@ impl<'a> Reader<'a> {
                     return Ok(o);
                 }
 
-                let tri = self.leaf_ints(a, 13)?.unwrap_or_default();
+                let mut tri = self.leaf_ints(a, 13)?.unwrap_or_default();
+                if o.weighted {
+                    self.sort_triangles(an, &mut tri)?;
+                }
                 o.sequence = self.sequence(self.p.get_node(a, 36, self.c.sequence));
                 o.r#type = Some("mesh".into());
                 o.path = get_str(14);
                 o.uvs = Some(self.leaf_floats(a, 12)?.unwrap_or_default());
-                o.hull = hull_count(&tri);
+                // 7번 필드에 hull 값 수(정점 수 × 2)가 들어 있다. 삼각형 가장자리로 세면 hull 밖에 안쪽 정점이 있는
+                // 메시(Spine 이 "internal vertex outside hull" 로 경고하는 것)에서 어긋난다. 필드가 없을 때만 센다.
+                let stored_hull = self.i(a, 7, -1);
+                o.hull = if stored_hull >= 0 { (zigzag_dec(stored_hull) / 2) as i32 } else { hull_count(&tri) };
                 o.triangles = Some(tri);
                 o.edges = Some(self.leaf_ints(a, 8)?.unwrap_or_default());
                 o.width = self.f(a, 16, 0.0);
@@ -1114,6 +1162,9 @@ impl<'a> Reader<'a> {
 
         if self.p.keys38() {
             if kind == "rotate" {
+                for k in keys.iter_mut() {
+                    k.angle38 = k.values.as_ref().and_then(|v| v.first().copied());
+                }
                 unwrap38(&mut keys)?;
             }
             self.handles38(&mut keys, &key_nodes, nc)?;
@@ -1146,6 +1197,7 @@ impl<'a> Reader<'a> {
             let c2 = self.f(nodes[i], 5, 0.0);
             let c3 = self.f(nodes[i], 6, 0.75);
             let c4 = self.f(nodes[i], 7, 1.0);
+            a.curve38 = Some([c1, c2, c3, c4]);
             let dt = b.frame - a.frame;
             let av = a.values.as_deref().unwrap_or(&[]);
             let bv = b.values.as_deref().unwrap_or(&[]);
@@ -1346,6 +1398,59 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// 메시마다 linked mesh 가 몇 개 달려 있는지 센다. linked mesh 의 linked mesh 는 뿌리 메시에 센다.
+fn linked_children(p: &View, mesh_att: GK) -> HashMap<NodeId, usize> {
+    let mut out: HashMap<NodeId, usize> = HashMap::new();
+    for n in p.doc.of("MeshAtt") {
+        let mut root = p.get_node(Some(n), 26, mesh_att);
+        let mut steps = 0;
+        while let Some(up) = p.get_node(root, 26, mesh_att) {
+            root = Some(up);
+            steps += 1;
+            if steps > 64 {
+                break; // 고리: 더 올라가지 않는다
+            }
+        }
+        if let Some(root) = root {
+            *out.entry(root).or_insert(0) += 1;
+        }
+    }
+    out
+}
+
+/// 가중치 메시의 삼각형을 Spine 이 프로젝트를 열 때 하는 대로 한 번 정렬한다.
+///
+/// Spine 은 삼각형마다 "세 정점의 가중치 합이 가장 큰 뼈"를 구해, 가중치 목록에서 아래에 있는 뼈의 삼각형부터
+/// 그리도록 늘어놓는다(목록 위쪽 뼈의 삼각형이 위에 그려진다). 같은 뼈의 삼각형끼리는 들어온 순서의 반대가 된다.
+/// `weights` 는 정점별로 가중치 목록 순서의 가중치다.
+fn sort_triangles_once(tri: &mut [i64], weights: &[Vec<f32>]) {
+    let count = tri.len() / 3;
+    let mut keyed: Vec<(usize, usize)> = Vec::with_capacity(count); // (가장 센 뼈의 목록 위치, 삼각형 번호)
+    for (t, corners) in tri.chunks_exact(3).enumerate() {
+        let mut best = (0usize, f32::NEG_INFINITY);
+        let bones = weights.first().map_or(0, Vec::len);
+        for b in 0..bones {
+            let mut sum = 0f32;
+            for &v in corners {
+                match usize::try_from(v).ok().and_then(|v| weights.get(v)).and_then(|w| w.get(b)) {
+                    Some(w) => sum += w,
+                    None => return, // 잘린 자료: 건드리지 않는다
+                }
+            }
+            if sum > best.1 {
+                best = (b, sum);
+            }
+        }
+        keyed.push((best.0, t));
+    }
+    // 목록 위치가 큰 뼈부터, 같은 뼈 안에서는 뒤에 있던 삼각형부터
+    keyed.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    let old = tri.to_vec();
+    for (i, &(_, t)) in keyed.iter().enumerate() {
+        tri[i * 3..i * 3 + 3].copy_from_slice(&old[t * 3..t * 3 + 3]);
+    }
+}
+
 /// 3.8 회전 키는 가까운 쪽으로 돌도록 보간한다(차이를 -180~180 으로 접는다). 4.x 는 값을 그대로 보간하므로
 /// 앞 키와의 차이를 접어 이어 붙인 값으로 바꾼다(Spine 4.x 가 3.8 프로젝트를 열 때와 같다).
 fn unwrap38(keys: &mut [ModelKey]) -> R<()> {
@@ -1425,4 +1530,34 @@ fn hull_count(tri: &[i64]) -> i32 {
         i += 3;
     }
     count.values().filter(|&&v| v == 1).count() as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sort_triangles_once;
+
+    #[test]
+    fn weighted_triangles_follow_the_weights_list() {
+        // 정점 0~2 는 목록 첫째 뼈, 3~5 는 둘째 뼈, 6 은 반반
+        let mut weights = vec![vec![1.0f32, 0.0]; 3];
+        weights.extend(vec![vec![0.0f32, 1.0]; 3]);
+        weights.push(vec![0.5, 0.5]);
+        let mut tri: Vec<i64> = vec![0, 1, 2, 3, 4, 5, 2, 1, 0, 5, 4, 3];
+        sort_triangles_once(&mut tri, &weights);
+        // 목록 아래쪽(둘째) 뼈의 삼각형이 먼저, 같은 뼈 안에서는 들어온 순서의 반대
+        assert_eq!(tri, [5, 4, 3, 3, 4, 5, 2, 1, 0, 0, 1, 2]);
+        // 한 번 더 정렬하면(= linked mesh 하나) 묶음 순서는 그대로, 묶음 안만 다시 뒤집힌다
+        sort_triangles_once(&mut tri, &weights);
+        assert_eq!(tri, [3, 4, 5, 5, 4, 3, 0, 1, 2, 2, 1, 0]);
+
+        // 합이 같으면 목록에서 앞선 뼈: (6, 6, 6) 은 첫째 뼈의 묶음에 든다
+        let mut tri: Vec<i64> = vec![6, 6, 6, 3, 4, 5, 0, 1, 2];
+        sort_triangles_once(&mut tri, &weights);
+        assert_eq!(tri, [3, 4, 5, 0, 1, 2, 6, 6, 6]);
+
+        // 정점 번호가 범위를 벗어나면 건드리지 않는다
+        let mut tri: Vec<i64> = vec![0, 1, 9, 3, 4, 5];
+        sort_triangles_once(&mut tri, &weights);
+        assert_eq!(tri, [0, 1, 9, 3, 4, 5]);
+    }
 }

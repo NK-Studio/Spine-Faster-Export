@@ -219,6 +219,7 @@ fn key(v: &Value) -> ModelKey {
         offsets: v["Offsets"]
             .as_array()
             .map(|a| a.iter().map(|o| (o["Key"].as_str().unwrap().to_string(), i(&o["Value"]))).collect()),
+        ..Default::default()
     }
 }
 

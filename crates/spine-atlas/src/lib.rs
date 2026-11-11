@@ -2,13 +2,14 @@
 //!
 //! 설정은 Spine 의 Texture Packer Settings 와 같은 항목·JSON 키(`pack.json`)를 쓴다.
 //! 기본값([`AtlasSettings::default`])의 결과는 C# 과 같고(여백 2·가장자리 여백·투명 테두리 잘라내기(알파 3 초과)·회전·PMA),
-//! PMA/블리드/에일리어스/최대 크기 옵션은 파이썬 PoC 와 같다.
+//! PMA/에일리어스/최대 크기 옵션은 파이썬 PoC 와 같다. 블리드는 Spine 처럼 페이지 전체에 한다(영역 사이 여백까지).
 //! 페이지 안 배치는 Spine 과 같지 않을 수 있다(런타임은 atlas 좌표를 쓰므로 결과에는 영향이 없다).
 //!
 //! 공개 API(계약): [`AtlasSettings`], [`pack`], [`pack_scales`], [`encode_png`]. 빠진 이미지 목록이 필요하면 [`pack_detailed`].
 
 mod natural;
 mod png_codec;
+mod polygon;
 mod resize;
 
 use std::collections::{HashMap, HashSet};
@@ -17,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use spine_model::{AtlasOutput, AtlasPage, SkeletonModel, SpineError, SpineResult};
+use spine_model::{AtlasOutput, AtlasPage, ModelAttachment, ModelSkin, ModelSkinEntry, SkeletonModel, SpineError, SpineResult};
 
 pub use natural::natural_cmp;
 pub use png_codec::decode_file as decode_png_file;
@@ -131,7 +132,7 @@ pub struct AtlasSettings {
     /// 격자 배치(같은 크기 칸에 차례로).
     pub grid: bool,
     /// Spine 4.x 의 Packing: "rectangles" · "grid" · "polygons". 읽을 때 "grid" 면 `grid` 를 켠다([`normalize`](Self::normalize)).
-    /// "polygons" 는 지원하지 않아 직사각형으로 묶는다.
+    /// "polygons" 는 메시만 쓰는 이미지를 메시가 덮는 모양대로 묶는다(`polygon` 모듈).
     pub packing: String,
     /// 미리 곱한 알파.
     #[serde(rename = "premultiplyAlpha")]
@@ -157,6 +158,12 @@ pub struct AtlasSettings {
     pub debug: bool,
     /// 두 번째 페이지부터 파일 이름과 번호 사이에 넣는 글자(Spine `separator`, 기본 `_`): `이름.png`, `이름_2.png` …
     pub separator: String,
+    /// Legacy output: 3.8 이하 런타임이 읽는 옛 atlas 형식(`rotate` · `xy` · `size` · `orig` · `offset` · `index`)으로 쓴다.
+    pub legacy_output: bool,
+    /// 옛 형식의 머리말을 Spine 3.8 편집기가 쓰던 글자로 쓴다(`size: 1534,529` · `filter: Linear,Linear`: 쉼표 뒤에 빈칸이 없다).
+    /// Spine 4.x 의 Legacy output 은 `size: 1534, 529` 처럼 쓴다. 런타임은 둘 다 읽는다. pack.json 에는 없는 값이다.
+    #[serde(skip)]
+    pub legacy_editor38: bool,
 }
 
 impl Default for AtlasSettings {
@@ -199,6 +206,8 @@ impl Default for AtlasSettings {
             fast: false,
             debug: false,
             separator: "_".into(),
+            legacy_output: false,
+            legacy_editor38: false,
         }
     }
 }
@@ -218,6 +227,11 @@ impl AtlasSettings {
         }
         self.packing = if self.grid { "grid" } else if self.packing.eq_ignore_ascii_case("polygons") { "polygons" } else { "rectangles" }.into();
         self
+    }
+
+    /// Packing: Polygons 인가.
+    pub fn polygons(&self) -> bool {
+        !self.grid && self.packing.eq_ignore_ascii_case("polygons")
     }
 
     /// 저장할 때: `packing` 을 `grid` 에 맞춘다.
@@ -285,9 +299,14 @@ struct Region {
     pix: Vec<u8>,
     /// 에일리어스 비교 키(에일리어스를 켰을 때만).
     key: Option<AliasKey>,
+    /// 다각형 패킹: 메시 삼각형이 걸친 픽셀(hull 발자국, w×h, 0 이 아니면 걸침). None 이면 사각형 전체.
+    /// 자리는 이 발자국으로 잡고, 페이지에는 바깥 한 줄을 더해 옮긴다(`blit` 의 덧칠).
+    mask: Option<Vec<u8>>,
     x: i32,
     y: i32,
     rotated: bool,
+    /// 180도 더 돌린다(다각형 패킹의 모양 영역만): rotated 와 합쳐 `rotate:180` · `rotate:270`.
+    flip: bool,
 }
 
 impl Region {
@@ -296,9 +315,9 @@ impl Region {
     }
 }
 
-/// (left, top, w, h, 원본 w, 원본 h, 완전 투명 픽셀 RGB 를 지운 straight 픽셀).
+/// (left, top, w, h, 원본 w, 원본 h, 완전 투명 픽셀 RGB 를 지운 straight 픽셀, 다각형 패킹의 모양).
 #[derive(PartialEq, Eq, Hash)]
-struct AliasKey(i32, i32, i32, i32, i32, i32, Vec<u8>);
+struct AliasKey(i32, i32, i32, i32, i32, i32, Vec<u8>, Option<Vec<u8>>);
 
 /// atlas 이름: Flatten paths 면 폴더를 빼고, Use indexes 면 끝의 `_숫자` 를 번호로 뗀다.
 fn atlas_name(name: &str, s: &AtlasSettings) -> (String, Option<i64>) {
@@ -314,9 +333,13 @@ fn atlas_name(name: &str, s: &AtlasSettings) -> (String, Option<i64>) {
     (n.to_string(), None)
 }
 
-/// 투명 테두리 잘라내기(알파가 문턱값 이하인 줄·칸). 메시 이미지는 UV 가 전체 이미지 기준이라 자르지 않는다.
+/// 투명 테두리 잘라내기(알파가 문턱값 이하인 줄·칸).
+/// shape(메시만 쓰는 이미지에서 메시가 걸친 픽셀, 이미지 전체 크기)이 있으면 알파 대신 그 테두리 상자로 자른다
+/// (Spine 도 데이터 내보내기에서는 메시 이미지를 메시 UV 로 자른다). keep_shape 면 그 모양을 영역에 남긴다(다각형 패킹).
+/// 메시와 영역 첨부가 함께 쓰는 이미지는 shape 없이 strip 을 끄고 부른다(자르지 않는다).
 /// 돌려주는 bool: 문턱값을 넘는 픽셀이 하나도 없는 이미지.
-fn build_region(name: String, w: i32, h: i32, rgba: &[u8], strip_x: bool, strip_y: bool, settings: &AtlasSettings) -> (Region, bool) {
+#[allow(clippy::too_many_arguments)]
+fn build_region(name: String, w: i32, h: i32, rgba: &[u8], strip_x: bool, strip_y: bool, shape: Option<Vec<u8>>, keep_shape: bool, settings: &AtlasSettings) -> (Region, bool) {
     let (wu, hu) = (w as usize, h as usize);
     let th = settings.alpha_threshold;
     let (mut left, mut top, mut right, mut bottom) = (w, h, -1, -1);
@@ -330,9 +353,21 @@ fn build_region(name: String, w: i32, h: i32, rgba: &[u8], strip_x: bool, strip_
         right = right.max(last as i32);
     }
     let blank = right < 0;
-    // 다 투명한 이미지는 자르는 축을 1픽셀로 둔다(C# 과 같음)
-    let (left, right) = if !strip_x { (0, w - 1) } else if blank { (0, 0) } else { (left, right) };
-    let (top, bottom) = if !strip_y { (0, h - 1) } else if blank { (0, 0) } else { (top, bottom) };
+    let shape_box = shape.as_ref().and_then(|m| polygon::mask_bounds(m, wu, hu));
+    let shape = shape.filter(|_| shape_box.is_some());
+    let (left, right, top, bottom) = match shape_box {
+        Some((l, t, r, b)) => {
+            let (l, r) = if strip_x { (l, r) } else { (0, w - 1) };
+            let (t, b) = if strip_y { (t, b) } else { (0, h - 1) };
+            (l, r, t, b)
+        }
+        None => {
+            // 다 투명한 이미지는 자르는 축을 1픽셀로 둔다(C# 과 같음)
+            let (left, right) = if !strip_x { (0, w - 1) } else if blank { (0, 0) } else { (left, right) };
+            let (top, bottom) = if !strip_y { (0, h - 1) } else if blank { (0, 0) } else { (top, bottom) };
+            (left, right, top, bottom)
+        }
+    };
     let rw = (right - left + 1) as usize;
     let rh = (bottom - top + 1) as usize;
     let mut straight = Vec::with_capacity(rw * rh * 4);
@@ -340,6 +375,16 @@ fn build_region(name: String, w: i32, h: i32, rgba: &[u8], strip_x: bool, strip_
         let s = (y * wu + left as usize) * 4;
         straight.extend_from_slice(&rgba[s..s + rw * 4]);
     }
+    let mask = shape.map(|m| {
+        let mut cut = Vec::with_capacity(rw * rh);
+        for y in top as usize..=bottom as usize {
+            let s = y * wu + left as usize;
+            cut.extend_from_slice(&m[s..s + rw]);
+        }
+        cut
+    });
+    // 자른 뒤 모양이 사각형을 다 덮으면 사각형으로 다룬다. 다각형 패킹이 아니면 모양은 자르는 데만 쓴다.
+    let mask = mask.filter(|m| keep_shape && m.contains(&0));
 
     let key = if settings.alias {
         let mut k = straight.clone();
@@ -350,7 +395,7 @@ fn build_region(name: String, w: i32, h: i32, rgba: &[u8], strip_x: bool, strip_
                 p[2] = 0;
             }
         }
-        Some(AliasKey(left, top, rw as i32, rh as i32, w, h, k))
+        Some(AliasKey(left, top, rw as i32, rh as i32, w, h, k, mask.clone()))
     } else {
         None
     };
@@ -364,10 +409,8 @@ fn build_region(name: String, w: i32, h: i32, rgba: &[u8], strip_x: bool, strip_
             p[2] = (p[2] as u32 * a / 255) as u8;
         }
         straight
-    } else if settings.bleed {
-        // 블리드는 PMA 를 끌 때만 의미가 있다(Spine 도 PMA 켜짐에서는 결과가 같다)
-        bleed_rgb(rw, rh, straight, settings.bleed_iterations as usize)
     } else {
+        // 블리드는 페이지를 다 그린 뒤 한꺼번에 한다(`blit`)
         straight
     };
 
@@ -384,14 +427,17 @@ fn build_region(name: String, w: i32, h: i32, rgba: &[u8], strip_x: bool, strip_
         bottom_off: h - 1 - bottom,
         pix,
         key,
+        mask,
         x: 0,
         y: 0,
         rotated: false,
+        flip: false,
     };
     (region, blank)
 }
 
-/// 완전 투명 픽셀의 RGB 를 주변 8칸 평균(정수 나눗셈)으로 채운다(알파는 그대로). 잘라낸 뒤의 이미지에 2회 적용한다.
+/// 완전 투명 픽셀의 RGB 를 주변 8칸 평균(정수 나눗셈)으로 채운다(알파는 그대로). 다 그린 페이지에 2회 적용한다
+/// (Spine 과 같다: 영역 사이 여백에도 가까운 영역의 색이 번져, 알파를 미리 곱하지 않은 텍스처의 가장자리가 어두워지지 않는다).
 /// 한 회차 안에서는 앞서 채운 값을 쓰지 않고, 회차가 끝나야 다음 회차의 재료가 된다.
 /// (파이썬은 "앞 회차에 새로 채운 픽셀의 이웃"만 보지만, 그 밖의 빈 픽셀은 이미 채워진 이웃이 없으므로 결과가 같다.)
 fn bleed_rgb(w: usize, h: usize, mut px: Vec<u8>, iterations: usize) -> Vec<u8> {
@@ -447,24 +493,11 @@ fn region_names(model: &SkeletonModel) -> (Vec<String>, HashSet<String>) {
             if t != "region" && t != "mesh" && t != "linkedmesh" {
                 continue;
             }
-            let non_empty = |s: &Option<String>| s.as_deref().filter(|s| !s.is_empty()).map(str::to_owned);
-            let n = non_empty(&a.path)
-                .or_else(|| non_empty(&a.name))
-                .or_else(|| row.key.clone())
-                .unwrap_or_default();
-            let mut add = |frame: String| {
+            for frame in image_frames(row, a) {
                 if t != "region" {
                     mesh.insert(frame.clone());
                 }
                 names.insert(frame);
-            };
-            match &a.sequence {
-                None => add(n),
-                Some(q) => {
-                    for i in 0..q.count.max(0) {
-                        add(format!("{}{}", n, zfill(q.start + i, q.digits)));
-                    }
-                }
             }
         }
     }
@@ -472,6 +505,75 @@ fn region_names(model: &SkeletonModel) -> (Vec<String>, HashSet<String>) {
     // C#: OrderBy(Ordinal).OrderBy(Natural) — 자연 순, 같으면 Ordinal 순
     sorted.sort_by(|a, b| natural::natural_cmp(a, b).then_with(|| natural::ordinal_cmp(a, b)));
     (sorted, mesh)
+}
+
+/// 첨부 하나가 쓰는 이미지 이름(시퀀스면 프레임마다).
+fn image_frames(row: &ModelSkinEntry, a: &ModelAttachment) -> Vec<String> {
+    let non_empty = |s: &Option<String>| s.as_deref().filter(|s| !s.is_empty()).map(str::to_owned);
+    let n = non_empty(&a.path).or_else(|| non_empty(&a.name)).or_else(|| row.key.clone()).unwrap_or_default();
+    match &a.sequence {
+        None => vec![n],
+        Some(q) => (0..q.count.max(0)).map(|i| format!("{}{}", n, zfill(q.start + i, q.digits))).collect(),
+    }
+}
+
+/// 메시의 삼각형을 UV 로(삼각형마다 u0,v0,u1,v1,u2,v2). 데이터가 없거나 어긋나면 None.
+fn mesh_tris(a: &ModelAttachment) -> Option<Vec<[f64; 6]>> {
+    let (uvs, tri) = (a.uvs.as_deref()?, a.triangles.as_deref()?);
+    if tri.len() < 3 {
+        return None;
+    }
+    let uv = |i: i64| -> Option<(f64, f64)> {
+        let k = usize::try_from(i).ok()?.checked_mul(2)?;
+        Some((*uvs.get(k)?, *uvs.get(k + 1)?))
+    };
+    tri.chunks_exact(3)
+        .map(|t| {
+            let (a, b, c) = (uv(t[0])?, uv(t[1])?, uv(t[2])?);
+            Some([a.0, a.1, b.0, b.1, c.0, c.1])
+        })
+        .collect()
+}
+
+/// 연결 메시(linkedmesh)의 원본 메시를 찾는다: 적힌 스킨(없으면 같은 스킨 → 모든 스킨)에서 슬롯·이름이 같은 메시.
+fn linked_parent<'a>(model: &'a SkeletonModel, skin: &ModelSkin, row: &ModelSkinEntry, a: &ModelAttachment) -> Option<&'a ModelAttachment> {
+    let parent = a.parent.as_deref().filter(|p| !p.is_empty())?;
+    let slot = a.parent_slot.as_deref().filter(|s| !s.is_empty()).or(row.slot.as_deref());
+    let find = |s: &'a ModelSkin| {
+        s.attachments.iter().find_map(|r| {
+            let p = r.attachment.as_ref()?;
+            (p.type_str() == "mesh" && r.key.as_deref() == Some(parent) && r.slot.as_deref() == slot).then_some(p)
+        })
+    };
+    let named = a.skin.as_deref().filter(|s| !s.is_empty()).or(skin.name.as_deref());
+    model.skins.iter().filter(|s| s.name.as_deref() == named).find_map(find).or_else(|| model.skins.iter().find_map(find))
+}
+
+/// 다각형 패킹용: 메시만 쓰는 이미지 이름 → 그 메시들의 삼각형(UV).
+/// 영역 첨부도 쓰거나 메시 데이터를 찾지 못한 이미지는 넣지 않는다(사각형으로 묶는다).
+fn mesh_shapes(model: &SkeletonModel) -> HashMap<String, Vec<[f64; 6]>> {
+    let mut found: HashMap<String, Option<Vec<[f64; 6]>>> = HashMap::new();
+    for skin in &model.skins {
+        for row in &skin.attachments {
+            let Some(a) = &row.attachment else { continue };
+            let tris = match a.type_str() {
+                "region" => None,
+                "mesh" => mesh_tris(a),
+                "linkedmesh" => linked_parent(model, skin, row, a).and_then(mesh_tris),
+                _ => continue,
+            };
+            for frame in image_frames(row, a) {
+                match (found.get_mut(&frame), &tris) {
+                    (Some(Some(all)), Some(t)) => all.extend_from_slice(t),
+                    (Some(slot), _) => *slot = None,
+                    (None, _) => {
+                        found.insert(frame, tris.clone());
+                    }
+                }
+            }
+        }
+    }
+    found.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect()
 }
 
 /// 파이썬 str.zfill: 부호는 앞에 두고 0을 채운다.
@@ -503,6 +605,7 @@ struct Placed {
     x: i32,
     y: i32,
     rotated: bool,
+    flip: bool,
 }
 
 #[inline]
@@ -576,7 +679,7 @@ fn pack_page(order: &[usize], regions: &[Region], width: i32, height: i32, g: Ge
         let rotated = best & 1 != 0;
         let (x, y) = (spot.x, spot.y);
         let (w, h) = if rotated { (rw0, rh0) } else { (w0, h0) };
-        placed.push(Placed { idx, x, y, rotated });
+        placed.push(Placed { idx, x, y, rotated, flip: false });
         split_free(&mut free, &mut next, &mut pieces, &mut is_piece, &mut drop, x, y, x + w, y + h);
     }
     (placed, left)
@@ -755,6 +858,7 @@ fn pack_pages(regions: &mut [Region], packed: &[usize], s: &AtlasSettings) -> Sp
             r.x = p.x;
             r.y = p.y;
             r.rotated = p.rotated;
+            r.flip = p.flip;
         }
         pages.push(Page { w: bw, h: bh, regions: placed.iter().map(|p| p.idx).collect() });
         todo = left;
@@ -782,6 +886,7 @@ fn pack_grid(regions: &mut [Region], packed: &[usize], s: &AtlasSettings) -> Spi
             regions[i].x = g.ex + c * cell_w;
             regions[i].y = g.ey + r * cell_h;
             regions[i].rotated = false;
+            regions[i].flip = false;
         }
         let n = chunk.len() as i32;
         let used_cols = n.min(cols);
@@ -807,7 +912,23 @@ fn blit(page_w: i32, page_h: i32, ids: &[usize], regions: &[Region], s: &AtlasSe
     for &i in ids {
         let r = &regions[i];
         let (rw, rh, rx, ry) = (r.w as usize, r.h as usize, r.x as usize, r.y as usize);
-        if !r.rotated {
+        if let Some(hull) = &r.mask {
+            // 다각형 패킹: 발자국만 옮긴다(그 밖은 다른 영역의 자리일 수 있다). 바깥 한 줄은 아래에서 덧칠한다.
+            for y in 0..rh {
+                for (a, b) in polygon::runs(&hull[y * rw..(y + 1) * rw]) {
+                    if !r.rotated && !r.flip {
+                        let d = ((ry + y) * pw + rx + a) * 4;
+                        out[d..d + (b - a + 1) * 4].copy_from_slice(&r.pix[(y * rw + a) * 4..(y * rw + b + 1) * 4]);
+                    } else {
+                        for x in a..=b {
+                            let (tx, ty) = polygon::turn(rw, rh, r.rotated, r.flip, x, y);
+                            let d = ((ry + ty) * pw + rx + tx) * 4;
+                            out[d..d + 4].copy_from_slice(&r.pix[(y * rw + x) * 4..(y * rw + x + 1) * 4]);
+                        }
+                    }
+                }
+            }
+        } else if !r.rotated {
             for y in 0..rh {
                 let d = ((ry + y) * pw + rx) * 4;
                 out[d..d + rw * 4].copy_from_slice(&r.pix[y * rw * 4..(y + 1) * rw * 4]);
@@ -824,48 +945,136 @@ fn blit(page_w: i32, page_h: i32, ids: &[usize], regions: &[Region], s: &AtlasSe
             }
         }
     }
-    if s.duplicate_padding {
-        let (ax, ay) = ((s.padding_x / 2) as usize, (s.padding_y / 2) as usize);
-        for &i in ids {
-            duplicate_edges(&mut out, pw, ph, page_rect(&regions[i]), ax, ay);
+    // 덧칠: 모양의 바깥 한 줄(선형 필터가 읽는 줄)과 사각형의 duplicate padding.
+    // 모양은 이웃과 빈 픽셀 한 줄까지 붙을 수 있다. 영역마다 제 바로 바깥 한 줄을 읽으므로(선형 필터),
+    // 두 영역의 바깥 줄이 만나는 픽셀은 비워 두고 한 영역만 읽는 픽셀에만 그 영역의 픽셀을 쓴다
+    // (어느 쪽도 남의 픽셀을 읽지 않게).
+    let margin = polygon::shape_margin(s.padding_x as i32, s.padding_y as i32);
+    let (ax, ay) = if s.duplicate_padding { ((s.padding_x / 2) as usize, (s.padding_y / 2) as usize) } else { (0, 0) };
+    // (영역, 바깥 한 줄: 발자국을 (1,1) 에 둔 (w+2)×(h+2) 배열에서 한 번 넓혀 발자국을 뺀 것 — 영역 사각형 밖 한 줄까지 본다)
+    let rings: Vec<(usize, Vec<u8>)> = if margin > 0 {
+        ids.iter()
+            .filter_map(|&i| {
+                let r = &regions[i];
+                let hull = r.mask.as_ref()?;
+                let (w, h) = (r.w as usize, r.h as usize);
+                let mut base = vec![0u8; (w + 2) * (h + 2)];
+                for y in 0..h {
+                    base[(y + 1) * (w + 2) + 1..(y + 1) * (w + 2) + 1 + w].copy_from_slice(&hull[y * w..(y + 1) * w]);
+                }
+                let mut ring = polygon::widen(&base, w + 2, h + 2, 1);
+                ring.iter_mut().zip(&base).for_each(|(m, &b)| *m = (*m != 0 && b == 0) as u8);
+                Some((i, ring))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // 모양대로 놓은 영역은 여백이 다른 영역의 자리일 수 있어 늘리지 않는다(Spine 과 같음)
+    let rects = || ids.iter().filter(|&&i| regions[i].mask.is_none()).map(|&i| page_rect(&regions[i]));
+    // 바깥 줄의 픽셀마다: (페이지 픽셀 번호, 영역 안이면 그 픽셀의 pix 위치)
+    let ring_spots = |i: usize, ring: &[u8], each: &mut dyn FnMut(usize, Option<usize>)| {
+        let r = &regions[i];
+        let (w, h) = (r.w as i64, r.h as i64);
+        for ey in 0..h + 2 {
+            for ex in (0..w + 2).filter(|&ex| ring[(ey * (w + 2) + ex) as usize] != 0) {
+                let (x, y) = (ex - 1, ey - 1);
+                // polygon::turn 과 같은 규칙(영역 밖 좌표까지)
+                let (tx, ty) = match (r.rotated, r.flip) {
+                    (false, false) => (x, y),
+                    (true, false) => (y, w - 1 - x),
+                    (false, true) => (w - 1 - x, h - 1 - y),
+                    (true, true) => (h - 1 - y, x),
+                };
+                let (px, py) = (r.x as i64 + tx, r.y as i64 + ty);
+                if px < 0 || py < 0 || px >= pw as i64 || py >= ph as i64 {
+                    continue;
+                }
+                let inside = x >= 0 && y >= 0 && x < w && y < h;
+                each(py as usize * pw + px as usize, inside.then(|| ((y * w + x) * 4) as usize));
+            }
         }
+    };
+    if rings.is_empty() {
+        for rect in rects() {
+            duplicate_edges(&mut out, pw, ph, rect, ax, ay, None);
+        }
+    } else {
+        // 빈 픽셀마다 그 픽셀을 읽는 영역 수
+        let mut claims = vec![0u8; pw * ph];
+        for (i, ring) in &rings {
+            ring_spots(*i, ring, &mut |at, _| claims[at] = claims[at].saturating_add(1));
+        }
+        for rect in rects() {
+            padding_frame(pw, ph, rect, ax.max(1), ay.max(1), &mut |at, _| claims[at] = claims[at].saturating_add(1));
+        }
+        for (i, ring) in &rings {
+            let pix = &regions[*i].pix;
+            ring_spots(*i, ring, &mut |at, src| {
+                if let Some(src) = src.filter(|_| claims[at] == 1) {
+                    out[at * 4..at * 4 + 4].copy_from_slice(&pix[src..src + 4]);
+                }
+            });
+        }
+        for rect in rects() {
+            duplicate_edges(&mut out, pw, ph, rect, ax, ay, Some(&claims));
+        }
+    }
+    // 블리드는 PMA 를 끌 때만 의미가 있다(Spine 도 PMA 켜짐에서는 결과가 같다)
+    if s.bleed && !s.pma {
+        out = bleed_rgb(pw, ph, out, s.bleed_iterations as usize);
     }
     if s.debug {
         for &i in ids {
-            draw_rect(&mut out, pw, ph, page_rect(&regions[i]));
+            match &regions[i].mask {
+                Some(_) => draw_shape(&mut out, pw, &regions[i]),
+                None => draw_rect(&mut out, pw, ph, page_rect(&regions[i])),
+            }
         }
         draw_rect(&mut out, pw, ph, (0, 0, pw, ph));
     }
     out
 }
 
-/// Duplicate padding: 영역 가장자리 픽셀을 여백 절반만큼 바깥으로 늘린다(모서리 포함).
-fn duplicate_edges(out: &mut [u8], pw: usize, ph: usize, (x, y, w, h): (usize, usize, usize, usize), ax: usize, ay: usize) {
-    if w == 0 || h == 0 {
+/// 사각형을 가로 ax · 세로 ay 만큼 넓힌 테두리(사각형 밖, 페이지 안)의 픽셀마다:
+/// (그 픽셀의 번호, 가장 가까운 사각형 안 픽셀의 번호).
+fn padding_frame(pw: usize, ph: usize, (x, y, w, h): (usize, usize, usize, usize), ax: usize, ay: usize, each: &mut dyn FnMut(usize, usize)) {
+    if w == 0 || h == 0 || (ax == 0 && ay == 0) {
         return;
     }
-    let copy = |out: &mut [u8], from: (usize, usize), to: (usize, usize)| {
-        let (f, t) = ((from.1 * pw + from.0) * 4, (to.1 * pw + to.0) * 4);
-        out.copy_within(f..f + 4, t);
-    };
-    for row in y..(y + h).min(ph) {
-        for k in 1..=ax {
-            if x >= k {
-                copy(out, (x, row), (x - k, row));
+    let (x1, y1) = (x + w - 1, y + h - 1);
+    for row in y.saturating_sub(ay)..=(y1 + ay).min(ph - 1) {
+        for col in x.saturating_sub(ax)..=(x1 + ax).min(pw - 1) {
+            if (x..=x1).contains(&col) && (y..=y1).contains(&row) {
+                continue;
             }
-            if x + w - 1 + k < pw {
-                copy(out, (x + w - 1, row), (x + w - 1 + k, row));
-            }
+            each(row * pw + col, row.clamp(y, y1) * pw + col.clamp(x, x1));
         }
     }
-    let (x0, x1) = (x.saturating_sub(ax), (x + w - 1 + ax).min(pw - 1));
-    for col in x0..=x1 {
-        for k in 1..=ay {
-            if y >= k {
-                copy(out, (col, y), (col, y - k));
-            }
-            if y + h - 1 + k < ph {
-                copy(out, (col, y + h - 1), (col, y + h - 1 + k));
+}
+
+/// Duplicate padding: 영역 가장자리 픽셀을 여백 절반만큼 바깥으로 늘린다(모서리 포함).
+/// claims 가 있으면 이 영역만 노리는 픽셀(값이 1)에만 쓴다.
+fn duplicate_edges(out: &mut [u8], pw: usize, ph: usize, rect: (usize, usize, usize, usize), ax: usize, ay: usize, claims: Option<&[u8]>) {
+    padding_frame(pw, ph, rect, ax, ay, &mut |to, from| {
+        if claims.is_none_or(|c| c[to] == 1) {
+            out.copy_within(from * 4..from * 4 + 4, to * 4);
+        }
+    });
+}
+
+/// Debug: 모양의 테두리를 분홍 선으로(다각형 패킹).
+fn draw_shape(out: &mut [u8], pw: usize, r: &Region) {
+    let Some(m) = &r.mask else { return };
+    let (w, h) = (r.w as usize, r.h as usize);
+    let on = |x: usize, y: usize| m[y * w + x] != 0;
+    for y in 0..h {
+        for x in 0..w {
+            let edge = on(x, y) && (x == 0 || y == 0 || x + 1 == w || y + 1 == h || !on(x - 1, y) || !on(x + 1, y) || !on(x, y - 1) || !on(x, y + 1));
+            if edge {
+                let (tx, ty) = polygon::turn(w, h, r.rotated, r.flip, x, y);
+                let o = ((r.y as usize + ty) * pw + r.x as usize + tx) * 4;
+                out[o..o + 4].copy_from_slice(&[255, 0, 255, 255]);
             }
         }
     }
@@ -948,6 +1157,9 @@ pub struct Source {
     pub mesh: bool,
     /// 페이지를 따로 쓰는 묶음(이미지 폴더의 하위 폴더). None 이면 모두 한데 묶는다.
     pub group: Option<String>,
+    /// 다각형 패킹용: 이 이미지를 메시만 쓸 때 그 메시들의 삼각형(UV 0~1, 왼쪽 위 원점, 삼각형마다 u0,v0,u1,v1,u2,v2).
+    /// 비어 있으면 사각형으로 묶는다.
+    pub tris: Vec<[f64; 6]>,
 }
 
 fn sort_sources(sources: &mut [Source]) {
@@ -970,9 +1182,16 @@ pub fn attachment_sources(model: &SkeletonModel, images_dir: &Path) -> SpineResu
         return Err(SpineError::Format("묶을 이미지가 없습니다".into()));
     }
     need_images_dir(images_dir)?;
+    let mut shapes = mesh_shapes(model);
     Ok(names
         .into_iter()
-        .map(|name| Source { path: images_dir.join(format!("{name}.png")), mesh: mesh.contains(&name), name, group: None })
+        .map(|name| Source {
+            path: images_dir.join(format!("{name}.png")),
+            mesh: mesh.contains(&name),
+            tris: shapes.remove(&name).unwrap_or_default(),
+            name,
+            group: None,
+        })
         .collect())
 }
 
@@ -981,6 +1200,7 @@ pub fn attachment_sources(model: &SkeletonModel, images_dir: &Path) -> SpineResu
 pub fn folder_sources(model: &SkeletonModel, images_dir: &Path, combine: bool) -> SpineResult<Vec<Source>> {
     need_images_dir(images_dir)?;
     let (_, mesh) = region_names(model);
+    let mut shapes = mesh_shapes(model);
     let mut out = Vec::new();
     let mut stack = vec![(images_dir.to_path_buf(), String::new())];
     while let Some((dir, prefix)) = stack.pop() {
@@ -995,7 +1215,7 @@ pub fn folder_sources(model: &SkeletonModel, images_dir: &Path, combine: bool) -
             } else if let Some(stem) = file.strip_suffix(".png").or_else(|| file.strip_suffix(".PNG")) {
                 let name = format!("{prefix}{stem}");
                 let group = (!combine).then(|| prefix.clone());
-                out.push(Source { mesh: mesh.contains(&name), name, path, group });
+                out.push(Source { mesh: mesh.contains(&name), tris: shapes.remove(&name).unwrap_or_default(), name, path, group });
             }
         }
     }
@@ -1016,6 +1236,12 @@ pub fn merge_sources(lists: Vec<Vec<Source>>) -> (Vec<Source>, Vec<String>) {
         match at.get(&s.name) {
             Some(&i) => {
                 out[i].mesh |= s.mesh;
+                // 한쪽이라도 사각형으로 쓰면 사각형, 아니면 모양을 합친다
+                if out[i].tris.is_empty() || s.tris.is_empty() {
+                    out[i].tris.clear();
+                } else {
+                    out[i].tris.extend_from_slice(&s.tris);
+                }
                 if out[i].path != s.path && !clash.contains(&s.name) {
                     clash.push(s.name);
                 }
@@ -1038,12 +1264,13 @@ fn pack_at(sources: &[Source], name: &str, settings: &AtlasSettings, scale: f32)
 
     // 이미지 읽기·잘라내기는 영역마다 독립이라 병렬로 한다(순서는 이름 순 그대로).
     let (sx, sy) = (settings.strip_whitespace_x, settings.strip_whitespace_y);
+    let polygons = settings.polygons();
     let loaded: Vec<SpineResult<(Region, bool, bool)>> = sources
         .par_iter()
         .map(|src| {
             let (rn, path) = (&src.name, &src.path);
             if !path.is_file() {
-                let (r, _) = build_region(rn.clone(), 1, 1, &[0u8; 4], false, false, settings);
+                let (r, _) = build_region(rn.clone(), 1, 1, &[0u8; 4], false, false, None, false, settings);
                 return Ok((r, true, false));
             }
             let (w, h, mut rgba) = png_codec::decode_file(path)?;
@@ -1052,8 +1279,10 @@ fn pack_at(sources: &[Source], name: &str, settings: &AtlasSettings, scale: f32)
                 let (nw, nh, px) = resize::resize(w as usize, h as usize, &rgba, scale);
                 (w, h, rgba) = (nw as i32, nh as i32, px);
             }
-            let strip = !src.mesh;
-            let (r, blank) = build_region(rn.clone(), w, h, &rgba, strip && sx, strip && sy, settings);
+            // 메시만 쓰는 이미지는 패킹 방식과 상관없이 메시가 걸친 범위로 자른다
+            let shape = polygon::raster_tris(w as usize, h as usize, &src.tris);
+            let strip = !src.mesh || shape.is_some();
+            let (r, blank) = build_region(rn.clone(), w, h, &rgba, strip && sx, strip && sy, shape, polygons, settings);
             Ok((r, false, blank))
         })
         .collect();
@@ -1103,14 +1332,38 @@ fn pack_at(sources: &[Source], name: &str, settings: &AtlasSettings, scale: f32)
     }
     let mut pages = Vec::new();
     for ids in by_group.values() {
-        pages.extend(if settings.grid { pack_grid(&mut regions, ids, settings)? } else { pack_pages(&mut regions, ids, settings)? });
+        if settings.grid {
+            pages.extend(pack_grid(&mut regions, ids, settings)?);
+            continue;
+        }
+        // 다각형 패킹: 모양대로 묶은 것과 사각형으로 묶은 것 중 페이지가 적고 좁은 쪽을 쓴다
+        let shaped = if polygons && ids.iter().any(|&i| regions[i].mask.is_some()) {
+            polygon::pack_polygons(&mut regions, ids, settings).ok().map(|p| {
+                let spots: Vec<(usize, i32, i32, bool, bool)> = ids.iter().map(|&i| (i, regions[i].x, regions[i].y, regions[i].rotated, regions[i].flip)).collect();
+                (p, spots)
+            })
+        } else {
+            None
+        };
+        let rects = pack_pages(&mut regions, ids, settings)?;
+        let size = |p: &[Page]| (p.len(), p.iter().map(|p| p.w as i64 * p.h as i64).sum::<i64>());
+        match shaped {
+            Some((p, spots)) if size(&p) < size(&rects) => {
+                for (i, x, y, rotated, flip) in spots {
+                    (regions[i].x, regions[i].y, regions[i].rotated, regions[i].flip) = (x, y, rotated, flip);
+                }
+                pages.extend(p);
+            }
+            _ => pages.extend(rects),
+        }
     }
     for (&rep, list) in &aliases {
-        let (x, y, rot) = (regions[rep].x, regions[rep].y, regions[rep].rotated);
+        let (x, y, rot, flip) = (regions[rep].x, regions[rep].y, regions[rep].rotated, regions[rep].flip);
         for &i in list {
             regions[i].x = x;
             regions[i].y = y;
             regions[i].rotated = rot;
+            regions[i].flip = flip;
         }
     }
 
@@ -1126,33 +1379,82 @@ fn pack_at(sources: &[Source], name: &str, settings: &AtlasSettings, scale: f32)
     for (i, (page, rgba)) in pages.iter().zip(rgbas).enumerate() {
         // Spine: 첫 페이지는 이름 그대로, 다음부터 `이름 + separator + 번호`(2부터)
         let file_name = if i == 0 { format!("{name}.png") } else { format!("{name}{}{}.png", settings.separator, i + 1) };
-        if i > 0 {
-            text.push('\n'); // 페이지 사이에는 빈 줄이 있어야 런타임이 새 페이지로 읽는다
-        }
-        let _ = writeln!(text, "{}\nsize:{},{}", file_name, page.w, page.h);
-        if settings.format != PixelFormat::RGBA8888 {
-            let _ = writeln!(text, "format:{}", settings.format.as_str());
-        }
-        let _ = writeln!(text, "filter:{},{}", settings.filter_min.as_str(), settings.filter_mag.as_str());
-        if let Some(rep) = repeat {
-            let _ = writeln!(text, "repeat:{rep}");
-        }
-        if settings.pma {
-            text.push_str("pma:true\n");
-        }
-        let mut ids: Vec<usize> = page.regions.clone();
-        for &r in &page.regions {
-            if let Some(list) = aliases.get(&r) {
-                ids.extend_from_slice(list);
+        if settings.legacy_output {
+            // 옛 형식(Spine 의 Legacy output 과 같은 글자): 페이지마다 빈 줄로 시작하고, 머리말 네 줄은 순서·개수가 고정이다
+            // (3.8 런타임은 차례대로만 읽는다). pma · scale 줄은 없다.
+            let comma = if settings.legacy_editor38 { "," } else { ", " };
+            let _ = writeln!(
+                text,
+                "\n{}\nsize: {}{comma}{}\nformat: {}\nfilter: {}{comma}{}\nrepeat: {}",
+                file_name,
+                page.w,
+                page.h,
+                settings.format.as_str(),
+                settings.filter_min.as_str(),
+                settings.filter_mag.as_str(),
+                repeat.unwrap_or("none")
+            );
+        } else {
+            if i > 0 {
+                text.push('\n'); // 페이지 사이에는 빈 줄이 있어야 런타임이 새 페이지로 읽는다
+            }
+            let _ = writeln!(text, "{}\nsize:{},{}", file_name, page.w, page.h);
+            if settings.format != PixelFormat::RGBA8888 {
+                let _ = writeln!(text, "format:{}", settings.format.as_str());
+            }
+            let _ = writeln!(text, "filter:{},{}", settings.filter_min.as_str(), settings.filter_mag.as_str());
+            if let Some(rep) = repeat {
+                let _ = writeln!(text, "repeat:{rep}");
+            }
+            if settings.pma {
+                text.push_str("pma:true\n");
+            }
+            if scale != 1.0 {
+                let _ = writeln!(text, "scale:{scale}"); // Spine 도 배율을 적는다
             }
         }
-        // 안정 정렬(C# OrderBy · 파이썬 sorted 와 같음)
-        let keys: Vec<Vec<u16>> = ids.iter().map(|&i| regions[i].out_name.encode_utf16().collect()).collect();
-        let mut order: Vec<usize> = (0..ids.len()).collect();
-        order.sort_by(|&a, &b| natural::natural_cmp16(&keys[a], &keys[b]).then(regions[ids[a]].index.cmp(&regions[ids[b]].index)));
-        for o in order {
-            let r = &regions[ids[o]];
+        // 이름 순(자연 순, 같으면 index 순)으로 쓴다. 안정 정렬(C# OrderBy · 파이썬 sorted 와 같음).
+        // 같은 그림을 함께 쓰는 영역(에일리어스)은 Spine 처럼 그 그림을 실은 영역 바로 뒤에 이름 순으로 붙인다.
+        let by_name = |list: &[usize]| -> Vec<usize> {
+            let keys: Vec<Vec<u16>> = list.iter().map(|&i| regions[i].out_name.encode_utf16().collect()).collect();
+            let mut order: Vec<usize> = (0..list.len()).collect();
+            order.sort_by(|&a, &b| natural::natural_cmp16(&keys[a], &keys[b]).then(regions[list[a]].index.cmp(&regions[list[b]].index)));
+            order.into_iter().map(|o| list[o]).collect()
+        };
+        let mut ids: Vec<usize> = Vec::with_capacity(page.regions.len());
+        for r in by_name(&page.regions) {
+            ids.push(r);
+            if let Some(list) = aliases.get(&r) {
+                ids.extend(by_name(list));
+            }
+        }
+        for id in ids {
+            let r = &regions[id];
             let _ = writeln!(text, "{}", r.out_name);
+            if settings.legacy_output {
+                // 영역마다 여섯 줄, 순서 고정. 크기는 돌리기 전의 것이고 offset 은 왼쪽·아래 기준이다
+                let rotate = match (r.rotated, r.flip) {
+                    (false, false) => "false",
+                    (true, false) => "true",
+                    (false, true) => "180",
+                    (true, true) => "270",
+                };
+                let _ = writeln!(
+                    text,
+                    "  rotate: {}\n  xy: {}, {}\n  size: {}, {}\n  orig: {}, {}\n  offset: {}, {}\n  index: {}",
+                    rotate,
+                    r.x,
+                    r.y,
+                    r.w,
+                    r.h,
+                    r.orig_w,
+                    r.orig_h,
+                    r.left,
+                    r.bottom_off,
+                    r.index.unwrap_or(-1)
+                );
+                continue;
+            }
             if let Some(index) = r.index {
                 let _ = writeln!(text, "index:{index}");
             }
@@ -1160,8 +1462,11 @@ fn pack_at(sources: &[Source], name: &str, settings: &AtlasSettings, scale: f32)
             if r.stripped() {
                 let _ = writeln!(text, "offsets:{},{},{},{}", r.left, r.bottom_off, r.orig_w, r.orig_h);
             }
-            if r.rotated {
-                text.push_str("rotate:90\n");
+            match (r.rotated, r.flip) {
+                (true, false) => text.push_str("rotate:90\n"),
+                (false, true) => text.push_str("rotate:180\n"),
+                (true, true) => text.push_str("rotate:270\n"),
+                _ => {}
             }
         }
         out_pages.push(AtlasPage { name: file_name, width: page.w as u32, height: page.h as u32, rgba });
