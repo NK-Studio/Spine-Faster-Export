@@ -50,7 +50,8 @@
       "minimumSystemVersion": "11.0"
     },
     "windows": {
-      "nsis": { "installMode": "currentUser" }
+      "nsis": { "installMode": "currentUser" },
+      "wix": { "language": "ko-KR" }
     }
   }
 }
