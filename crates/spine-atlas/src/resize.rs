@@ -31,8 +31,7 @@ impl Resampling {
 
 /// (새 폭, 새 높이, RGBA). 새 크기는 반올림, 최소 1.
 pub fn resize(w: usize, h: usize, rgba: &[u8], scale: f32, method: Resampling) -> (usize, usize, Vec<u8>) {
-    let nw = ((w as f64 * scale as f64).round() as usize).max(1);
-    let nh = ((h as f64 * scale as f64).round() as usize).max(1);
+    let (nw, nh) = scaled_size(w, h, scale);
     if nw == w && nh == h {
         return (w, h, rgba.to_vec());
     }
@@ -42,6 +41,13 @@ pub fn resize(w: usize, h: usize, rgba: &[u8], scale: f32, method: Resampling) -
         Resampling::Nearest => progressive(w, h, rgba, nw, nh, nearest),
     };
     (nw, nh, out)
+}
+
+/// 배율을 적용한 크기: Java `Math.round(w * scale)` 처럼 f32 로 곱하고 ½ 은 올린다. 최소 1.
+/// (f64 로 곱하면 255 × 1.3 이 331.4999… 가 되어 Spine 의 332 와 달라진다.)
+pub fn scaled_size(w: usize, h: usize, scale: f32) -> (usize, usize) {
+    let r = |v: usize| (java_round(v as f32 * scale).max(1)) as usize;
+    (r(w), r(h))
 }
 
 type Step = fn(usize, usize, &[u8], usize, usize) -> Vec<u8>;
@@ -280,6 +286,14 @@ fn nearest(sw: usize, sh: usize, src: &[u8], dw: usize, dh: usize) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spine(Java float): 255 × 1.3 = 331.5 → 332. f64 로 곱하면 331.4999… → 331 이 된다.
+    #[test]
+    fn scaled_size_like_java_float() {
+        assert_eq!(scaled_size(255, 203, 1.3), (332, 264));
+        assert_eq!(scaled_size(37, 23, 0.5), (19, 12));
+        assert_eq!(scaled_size(3, 1, 0.1), (1, 1));
+    }
 
     #[test]
     fn halves_and_keeps_color() {

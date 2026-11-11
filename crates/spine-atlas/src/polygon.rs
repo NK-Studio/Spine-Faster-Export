@@ -25,13 +25,25 @@ use super::{natural, page_limits, page_size, too_big, AtlasSettings, Geo, Page, 
 
 /// 메시 삼각형(UV, 0~1, 왼쪽 위 원점)을 w×h 비트맵에 칠한다. 삼각형이 조금이라도 걸친 픽셀은 모두 칠한다(hull 발자국).
 /// 칠한 곳이 없거나 이미지 전체를 덮으면 None(사각형으로 묶는다).
+#[cfg(test)]
 pub(crate) fn raster_tris(w: usize, h: usize, tris: &[[f64; 6]]) -> Option<Vec<u8>> {
+    raster_tris_scaled(w, h, None, tris)
+}
+
+/// [`raster_tris`] 와 같지만 배율을 적용한 이미지(w×h)에 칠한다. `exact` 는 반올림하기 전의 크기(원본 × 배율).
+/// Spine 은 메시 좌표를 이 크기로, y 는 아래에서 위로 재서 구한다: x = u·폭, 위에서 잰 y = h − (1 − v)·높이.
+/// 그래서 배율 크기가 반올림되면 위쪽 경계가 v·h 와 한 줄 다를 수 있다(Spine 4.2 결과와 대조했다).
+pub(crate) fn raster_tris_scaled(w: usize, h: usize, exact: Option<(f64, f64)>, tris: &[[f64; 6]]) -> Option<Vec<u8>> {
     if w == 0 || h == 0 || tris.is_empty() {
         return None;
     }
+    // Spine(Java float)처럼 u·폭과 아래에서 잰 (1 − v)·높이를 f32 로 구한다(UV 도 프로젝트에 f32 로 저장돼 있다).
+    // 위에서 잰 y 로 바꾸는 뺄셈은 f64 로 정확히 한다: floor(h − y) = h − ceil(y) 가 그대로 성립해야 Spine 과 같다.
+    let (fw, fh) = exact.map_or((w as f32, h as f32), |(fw, fh)| (fw as f32, fh as f32));
+    let at = |u: f64, v: f64| ((u as f32 * fw) as f64, h as f64 - ((1.0 - v as f32) * fh) as f64);
     let mut mask = vec![0u8; w * h];
     for t in tris {
-        let p = [(t[0] * w as f64, t[1] * h as f64), (t[2] * w as f64, t[3] * h as f64), (t[4] * w as f64, t[5] * h as f64)];
+        let p = [at(t[0], t[1]), at(t[2], t[3]), at(t[4], t[5])];
         if p.iter().any(|v| !v.0.is_finite() || !v.1.is_finite()) {
             continue;
         }

@@ -560,6 +560,30 @@ fn polygon_shapes_from_model() {
     assert!(half[0] == 1 && half[3 * 8 + 3] == 0 && half[4] == 0);
 }
 
+/// 메시 범위는 Spine 처럼 f32 로, y 는 아래에서 재서 구한다(Cat 프로젝트의 UV 값과 Spine 4.2 가 자른 범위).
+#[test]
+fn mesh_crop_matches_spine() {
+    let f = |bits: u32| f32::from_bits(bits) as f64;
+    // u0 ≤ u ≤ u1, v0 ≤ v ≤ v1 를 덮는 사각형(삼각형 둘)
+    let quad = |u0: f64, u1: f64, v0: f64, v1: f64| vec![[u0, v0, u1, v0, u1, v1], [u0, v0, u1, v1, u0, v1]];
+    // 3017: u 최대 0.98571432 × 70 은 f64 로는 69 를 조금 넘지만 f32 로는 69 → 오른쪽 끝 68(포함)
+    let neck17 = quad(f(0x3c6a0ea1), f(0x3f7c57c6), 0.0, 1.0);
+    let m = polygon::raster_tris_scaled(70, 54, None, &neck17).unwrap();
+    assert_eq!(polygon::mask_bounds(&m, 70, 54), Some((1, 0, 68, 53)));
+    // 3033: v 최대 0.95833337 은 아래에서 재면 (1 − v)·48 = 1.9999981 → 아래 끝 46(포함)
+    let neck33 = quad(0.0, 1.0, f(0x3d2aaaab), f(0x3f755556));
+    let m = polygon::raster_tris_scaled(46, 48, None, &neck33).unwrap();
+    assert_eq!(polygon::mask_bounds(&m, 46, 48), Some((0, 2, 45, 46)));
+    let m = polygon::raster_tris_scaled(23, 24, Some((23.0, 24.0)), &neck33).unwrap();
+    assert_eq!(polygon::mask_bounds(&m, 23, 24), Some((0, 1, 22, 23)));
+    // 배율 크기가 반올림되면(140×106 의 1.6배 = 224×169.6 → 170) 위쪽 경계는 반올림 전 높이로 아래에서 잰다
+    let body = quad(0.0, 1.0, 0.004526, 0.991143);
+    let m = polygon::raster_tris_scaled(224, 170, Some((224.0, 169.6)), &body).unwrap();
+    assert_eq!(polygon::mask_bounds(&m, 224, 170).map(|b| (b.1, b.3)), Some((1, 168)));
+    let m = polygon::raster_tris_scaled(308, 233, Some((308.0, 233.2)), &body).unwrap();
+    assert_eq!(polygon::mask_bounds(&m, 308, 233).map(|b| (b.1, b.3)), Some((0, 230)));
+}
+
 /// spine-csharp 3.8 `Atlas.Load` 를 그대로 옮긴 파서: 키 이름을 보지 않고 줄을 정해진 순서로만 읽는다.
 /// (페이지 이름, 폭, 높이, [(영역 이름, rotate 값, x, y, w, h, orig w, orig h, offset x, offset y, index)])
 #[allow(clippy::type_complexity)]

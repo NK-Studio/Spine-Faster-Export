@@ -1432,12 +1432,14 @@ fn pack_at(sources: &[Source], name: &str, root: &AtlasSettings, suffix: &str) -
             }
             let (w, h, mut rgba) = png_codec::decode_file(path)?;
             let (mut w, mut h) = (w as i32, h as i32);
+            // 반올림하기 전의 배율 크기(메시 범위를 Spine 처럼 이 크기로 구한다)
+            let exact = (scale != 1.0).then(|| ((w as f32 * scale) as f64, (h as f32 * scale) as f64));
             if scale != 1.0 {
                 let (nw, nh, px) = resize::resize(w as usize, h as usize, &rgba, scale, method);
                 (w, h, rgba) = (nw as i32, nh as i32, px);
             }
             // 메시만 쓰는 이미지는 패킹 방식과 상관없이 메시가 걸친 범위로 자른다
-            let shape = polygon::raster_tris(w as usize, h as usize, &src.tris);
+            let shape = polygon::raster_tris_scaled(w as usize, h as usize, exact, &src.tris);
             let strip = !src.mesh || shape.is_some();
             let (sx, sy) = (settings.strip_whitespace_x, settings.strip_whitespace_y);
             let (r, blank) = build_region(rn.clone(), w, h, &rgba, strip && sx, strip && sy, shape, settings.polygons(), settings);
