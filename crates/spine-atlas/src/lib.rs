@@ -9,6 +9,7 @@
 
 mod natural;
 mod jpeg_codec;
+mod maxrects;
 mod png_codec;
 mod polygon;
 mod resize;
@@ -27,10 +28,6 @@ use spine_model::{AtlasOutput, AtlasPage, ModelAttachment, ModelSkin, ModelSkinE
 pub use natural::natural_cmp;
 pub use png_codec::decode_file as decode_png_file;
 pub use resize::Resampling;
-
-const SCORE_SHIFT: i64 = 16;
-const BEST_NONE: i64 = 1 << 40;
-const WIDTH_FACTORS: [f64; 11] = [0.8, 0.9, 1.0, 1.1, 1.2, 1.35, 1.5, 1.75, 2.0, 2.5, 3.0];
 
 /// 텍스처 필터(atlas `filter:` 줄).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -631,15 +628,7 @@ fn zfill(value: i64, width: i64) -> String {
     }
 }
 
-// ---------------------------------------------------------------- MaxRects
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct Rect {
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-}
+// ---------------------------------------------------------------- 배치
 
 #[derive(Clone, Copy)]
 struct Placed {
@@ -648,15 +637,6 @@ struct Placed {
     y: i32,
     rotated: bool,
     flip: bool,
-}
-
-#[inline]
-fn score(dw: i64, dh: i64) -> i64 {
-    if dw < dh {
-        (dw << SCORE_SHIFT) | dh
-    } else {
-        (dh << SCORE_SHIFT) | dw
-    }
 }
 
 /// 여백·회전 설정.
@@ -675,132 +655,6 @@ impl Geo {
         let (px, py) = (s.padding_x as i32, s.padding_y as i32);
         let (ex, ey) = if s.edge_padding { (px, py) } else { (0, 0) };
         Geo { px, py, ex, ey, rotation: s.rotation }
-    }
-}
-
-/// MaxRects(짧은 변 맞춤). 좌표·크기에 여백 포함. (놓인 것, 못 놓은 것)
-fn pack_page(order: &[usize], regions: &[Region], width: i32, height: i32, g: Geo) -> (Vec<Placed>, Vec<usize>) {
-    // 영역은 오른쪽·아래 여백까지 차지한다. 마지막 영역의 여백은 가장자리 여백이 되거나(Edge) 페이지 밖으로 나간다.
-    let mut free = vec![Rect { x: g.ex, y: g.ey, w: width - 2 * g.ex + g.px, h: height - 2 * g.ey + g.py }];
-    let mut next: Vec<Rect> = Vec::new();
-    let mut is_piece: Vec<bool> = Vec::new();
-    let mut pieces: Vec<usize> = Vec::new();
-    let mut drop: Vec<bool> = Vec::new();
-    let mut placed = Vec::new();
-    let mut left = Vec::new();
-    for &idx in order {
-        let r = &regions[idx];
-        let (w0, h0) = (r.w + g.px, r.h + g.py);
-        let (rw0, rh0) = (r.h + g.px, r.w + g.py);
-        let mut best = BEST_NONE;
-        let mut spot = Rect { x: 0, y: 0, w: 0, h: 0 };
-        for f in &free {
-            // 점수 (짧은 변 여유, 긴 변 여유, 회전)을 정수 하나로 합쳐 비교한다
-            if w0 <= f.w && h0 <= f.h {
-                let key = score((f.w - w0) as i64, (f.h - h0) as i64) << 1;
-                if key < best {
-                    best = key;
-                    spot = *f;
-                }
-            }
-            if g.rotation && rw0 <= f.w && rh0 <= f.h {
-                let key = (score((f.w - rw0) as i64, (f.h - rh0) as i64) << 1) | 1;
-                if key < best {
-                    best = key;
-                    spot = *f;
-                }
-            }
-            if best == 0 {
-                break; // 빈틈 없이 맞는 자리는 더 찾지 않는다
-            }
-        }
-        if best == BEST_NONE {
-            left.push(idx);
-            continue;
-        }
-        let rotated = best & 1 != 0;
-        let (x, y) = (spot.x, spot.y);
-        let (w, h) = if rotated { (rw0, rh0) } else { (w0, h0) };
-        placed.push(Placed { idx, x, y, rotated, flip: false });
-        split_free(&mut free, &mut next, &mut pieces, &mut is_piece, &mut drop, x, y, x + w, y + h);
-    }
-    (placed, left)
-}
-
-/// 겹치는 빈칸만 쪼갠다. 안 겹친 빈칸끼리는 이미 서로를 포함하지 않으므로 새 조각만 포함 검사를 한다.
-#[allow(clippy::too_many_arguments)]
-fn split_free(
-    free: &mut Vec<Rect>,
-    next: &mut Vec<Rect>,
-    pieces: &mut Vec<usize>,
-    is_piece: &mut Vec<bool>,
-    drop: &mut Vec<bool>,
-    x: i32,
-    y: i32,
-    right: i32,
-    bottom: i32,
-) {
-    next.clear();
-    pieces.clear();
-    for &f in free.iter() {
-        let fr = f.x + f.w;
-        let fb = f.y + f.h;
-        if x >= fr || right <= f.x || y >= fb || bottom <= f.y {
-            next.push(f);
-            continue;
-        }
-        if x > f.x {
-            pieces.push(next.len());
-            next.push(Rect { x: f.x, y: f.y, w: x - f.x, h: f.h });
-        }
-        if right < fr {
-            pieces.push(next.len());
-            next.push(Rect { x: right, y: f.y, w: fr - right, h: f.h });
-        }
-        if y > f.y {
-            pieces.push(next.len());
-            next.push(Rect { x: f.x, y: f.y, w: f.w, h: y - f.y });
-        }
-        if bottom < fb {
-            pieces.push(next.len());
-            next.push(Rect { x: f.x, y: bottom, w: f.w, h: fb - bottom });
-        }
-    }
-    if pieces.is_empty() {
-        std::mem::swap(free, next);
-        return;
-    }
-    is_piece.clear();
-    is_piece.resize(next.len(), false);
-    for &i in pieces.iter() {
-        is_piece[i] = true;
-    }
-    drop.clear();
-    drop.resize(next.len(), false);
-    let mut any = false;
-    for &i in pieces.iter() {
-        let a = next[i];
-        let ar = a.x + a.w;
-        let ab = a.y + a.h;
-        for (j, b) in next.iter().enumerate() {
-            if a.x >= b.x
-                && a.y >= b.y
-                && ar <= b.x + b.w
-                && ab <= b.y + b.h
-                && i != j
-                && (a != *b || i > j || !is_piece[j])
-            {
-                drop[i] = true;
-                any = true;
-                break;
-            }
-        }
-    }
-    free.clear();
-    if any {
-        free.extend(next.iter().zip(drop.iter()).filter(|(_, &d)| !d).map(|(r, _)| *r));
-    } else {
-        std::mem::swap(free, next);
     }
 }
 
@@ -846,99 +700,53 @@ fn too_big(regions: &[Region], idx: usize, max_w: i32, max_h: i32) -> SpineError
     SpineError::Format(format!("{}×{} 페이지에 들어가지 않는 이미지가 있습니다: {}", max_w, max_h, regions[idx].name))
 }
 
-/// 여러 폭을 시험해 넓이가 가장 작은 배치를 고른다. 한 장에 안 들어가면 페이지를 나눈다.
-/// 폭마다의 시험은 서로 독립이라 병렬로 돌리고, 고르는 것은 폭 순서대로 한다(결과는 순차와 같다).
-fn pack_pages(regions: &mut [Region], packed: &[usize], s: &AtlasSettings) -> SpineResult<Vec<Page>> {
-    let g = Geo::of(s);
-    let (max_w, max_h) = page_limits(s);
-    let mut todo: Vec<usize> = packed.to_vec();
-    todo.sort_by(|&a, &b| {
-        let (ra, rb) = (&regions[a], &regions[b]);
-        rb.w.max(rb.h)
-            .cmp(&ra.w.max(ra.h))
-            .then(rb.w.min(rb.h).cmp(&ra.w.min(ra.h)))
-            .then_with(|| natural::ordinal_cmp(&ra.name, &rb.name))
-    });
-    let factors: &[f64] = if s.fast { &[1.0] } else { &WIDTH_FACTORS };
-    let mut pages = Vec::new();
-    while !todo.is_empty() {
-        let area: i64 = todo.iter().map(|&i| (regions[i].w + g.px) as i64 * (regions[i].h + g.py) as i64).sum();
-        let dim = |i: usize| if g.rotation { regions[i].w.max(regions[i].h) } else { regions[i].w };
-        let widest = todo.iter().map(|&i| dim(i) + 2 * g.ex).max().unwrap();
-        let side = widest.max((area as f64).sqrt() as i32);
-        let mut widths: Vec<i32> = factors.iter().map(|f| max_w.min(widest.max((side as f64 * f) as i32))).collect();
-        widths.sort_unstable();
-        widths.dedup();
-
-        let regs: &[Region] = regions;
-        let trials: Vec<(Vec<Placed>, Vec<usize>)> =
-            widths.par_iter().map(|&wide| pack_page(&todo, regs, wide, max_h, g)).collect();
-
-        let mut best: Option<(usize, i64, i32, i32, usize)> = None; // (못 놓은 수, 넓이, w, h, 시험 번호)
-        for (t, (placed, left)) in trials.iter().enumerate() {
-            if placed.is_empty() {
-                continue;
-            }
-            let used_w = placed.iter().map(|p| p.x + if p.rotated { regs[p.idx].h } else { regs[p.idx].w }).max().unwrap() + g.ex;
-            let used_h = placed.iter().map(|p| p.y + if p.rotated { regs[p.idx].w } else { regs[p.idx].h }).max().unwrap() + g.ey;
-            let (pw, ph) = page_size(used_w, used_h, s, max_w, max_h);
-            let page_area = pw as i64 * ph as i64;
-            let better = match best {
-                None => true,
-                Some((bl, ba, ..)) => left.len() < bl || (left.len() == bl && page_area < ba),
-            };
-            if better {
-                best = Some((left.len(), page_area, pw, ph, t));
-            }
-        }
-        let Some((_, _, bw, bh, t)) = best else {
-            return Err(too_big(regions, todo[0], max_w, max_h));
-        };
-        let (placed, left) = trials.into_iter().nth(t).unwrap();
-        for p in &placed {
-            let r = &mut regions[p.idx];
-            r.x = p.x;
-            r.y = p.y;
-            r.rotated = p.rotated;
-            r.flip = p.flip;
-        }
-        pages.push(Page { w: bw, h: bh, regions: placed.iter().map(|p| p.idx).collect() });
-        todo = left;
+fn packer_settings(s: &AtlasSettings) -> maxrects::Settings {
+    let clamp = |v: u32| v.min(i32::MAX as u32 / 4) as i32;
+    maxrects::Settings {
+        px: s.padding_x as i32,
+        py: s.padding_y as i32,
+        max_w: clamp(s.max_width),
+        max_h: clamp(s.max_height),
+        min_w: clamp(s.min_width),
+        min_h: clamp(s.min_height),
+        edge_padding: s.edge_padding,
+        duplicate_padding: s.duplicate_padding,
+        rotation: s.rotation,
+        fast: s.fast,
+        square: s.square,
+        pot: s.pot,
+        mod4: s.multiple_of_four,
     }
-    Ok(pages)
 }
 
-/// 격자 배치: 가장 큰 영역 크기의 칸에 이름 순으로 왼쪽→오른쪽, 위→아래. 회전하지 않는다.
+/// 사각형 배치: Spine 과 같은 자리에 놓는다([`maxrects`]). 영역은 이름(Ordinal) 순으로 넣는다.
+fn pack_pages(regions: &mut [Region], packed: &[usize], s: &AtlasSettings) -> SpineResult<Vec<Page>> {
+let ms = packer_settings(s);
+    let mut order: Vec<usize> = packed.to_vec();
+    order.sort_by(|&a, &b| natural::ordinal_cmp(&regions[a].name, &regions[b].name));
+    let sizes: Vec<(usize, i32, i32)> = order.iter().map(|&i| (i, regions[i].w, regions[i].h)).collect();
+    let pages = maxrects::pack(&sizes, &ms).map_err(|i| too_big(regions, i, s.max_width as i32, s.max_height as i32))?;
+    Ok(placed_pages(regions, pages))
+}
+
+fn placed_pages(regions: &mut [Region], pages: Vec<maxrects::PageOut>) -> Vec<Page> {
+    pages
+        .into_iter()
+        .map(|p| {
+            for q in &p.placed {
+                let r = &mut regions[q.idx];
+                (r.x, r.y, r.rotated, r.flip) = (q.x, q.y, q.rotated, false);
+            }
+            Page { w: p.w, h: p.h, regions: p.placed.iter().map(|q| q.idx).collect() }
+        })
+        .collect()
+}
+
+/// 격자 배치([`maxrects::pack_grid`]). 영역은 들어온 차례(이름 순) 그대로.
 fn pack_grid(regions: &mut [Region], packed: &[usize], s: &AtlasSettings) -> SpineResult<Vec<Page>> {
-    let g = Geo::of(s);
-    let (max_w, max_h) = page_limits(s);
-    let cell_w = packed.iter().map(|&i| regions[i].w).max().unwrap_or(1) + g.px;
-    let cell_h = packed.iter().map(|&i| regions[i].h).max().unwrap_or(1) + g.py;
-    let cols = (max_w - 2 * g.ex + g.px) / cell_w;
-    let rows = (max_h - 2 * g.ey + g.py) / cell_h;
-    if cols < 1 || rows < 1 {
-        let big = *packed.iter().max_by_key(|&&i| regions[i].w.max(regions[i].h)).unwrap();
-        return Err(too_big(regions, big, max_w, max_h));
-    }
-    let per_page = (cols * rows) as usize;
-    let mut pages = Vec::new();
-    for chunk in packed.chunks(per_page) {
-        for (k, &i) in chunk.iter().enumerate() {
-            let (c, r) = ((k as i32) % cols, (k as i32) / cols);
-            regions[i].x = g.ex + c * cell_w;
-            regions[i].y = g.ey + r * cell_h;
-            regions[i].rotated = false;
-            regions[i].flip = false;
-        }
-        let n = chunk.len() as i32;
-        let used_cols = n.min(cols);
-        let used_rows = (n + cols - 1) / cols;
-        let used_w = g.ex + used_cols * cell_w - g.px + g.ex;
-        let used_h = g.ey + used_rows * cell_h - g.py + g.ey;
-        let (w, h) = page_size(used_w, used_h, s, max_w, max_h);
-        pages.push(Page { w, h, regions: chunk.to_vec() });
-    }
-    Ok(pages)
+    let sizes: Vec<(usize, i32, i32)> = packed.iter().map(|&i| (i, regions[i].w, regions[i].h)).collect();
+    let pages = maxrects::pack_grid(&sizes, &packer_settings(s)).map_err(|i| too_big(regions, i, s.max_width as i32, s.max_height as i32))?;
+    Ok(placed_pages(regions, pages))
 }
 
 /// 페이지 위 영역 사각형(회전 반영).
