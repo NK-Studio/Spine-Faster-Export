@@ -994,3 +994,62 @@ fn output_format_and_quality_settings() {
     assert!(AtlasSettings { output_format: "jpg".into(), jpeg_quality: 1.5, ..AtlasSettings::default() }.check().is_err());
     assert!(AtlasSettings { output_format: "jpg".into(), jpeg_quality: 0.0, ..AtlasSettings::default() }.check().is_ok());
 }
+
+#[test]
+fn auto_scale_like_spine() {
+    // Spine 4.2 의 Auto scale: 한 페이지에 다 들어갈 때까지 배율을 0.01 씩 낮추고, 고른 배율을 `scale:` 줄에 적는다.
+    let dir = temp_dir("autoscale");
+    let m = many(&dir);
+    let base = AtlasSettings { rotation: false, ..AtlasSettings::default() }.with_max_size(64);
+    let pages = |s: &AtlasSettings| pack(&m, &dir, "a", s).unwrap();
+    assert!(pages(&base).pages.len() > 1, "시험 전제: 배율 1 에서는 여러 페이지");
+    let auto = pages(&AtlasSettings { auto_scale: true, ..base.clone() });
+    assert_eq!(auto.pages.len(), 1);
+    let line = auto.atlas_text.lines().find(|l| l.starts_with("scale:")).expect("scale 줄");
+    let picked: f32 = line["scale:".len()..].parse().unwrap();
+    assert!(picked < 1.0 && (picked * 100.0 - (picked * 100.0).round()).abs() < 1e-3, "{picked}");
+    // 고른 배율로 그냥 묶은 것과 같고, 0.01 큰 배율은 한 페이지에 안 들어간다
+    let fixed = pages(&AtlasSettings { scale: vec![picked], ..base.clone() });
+    assert_eq!(fixed.atlas_text, auto.atlas_text);
+    let above = ((picked * 100.0).round() + 1.0) / 100.0;
+    assert!(pages(&AtlasSettings { scale: vec![above], ..base.clone() }).pages.len() > 1);
+    // 이미 한 페이지면 배율을 건드리지 않는다
+    let roomy = AtlasSettings { auto_scale: true, ..AtlasSettings::default() };
+    assert_eq!(pages(&roomy).atlas_text, pages(&AtlasSettings { auto_scale: false, ..roomy.clone() }).atlas_text);
+    // 내려가는 단계: 0.705 → 0.7, 0.703 → 0.69, 1.2 → 1.19, 0.01 다음은 없다
+    assert_eq!(next_auto_scale(0.705).unwrap(), 0.7);
+    assert_eq!(next_auto_scale(0.703).unwrap(), 0.69);
+    assert_eq!(next_auto_scale(1.2).unwrap(), 1.19);
+    assert!(next_auto_scale(0.01).is_err());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn alias_first_of_content_like_spine() {
+    // Spine: 잘라낸 내용이 같아도 처음 나온 영역과 오프셋 · 원본 크기가 다르면 합치지 않고,
+    // 그런 영역끼리도(서로 같아도) 합치지 않는다.
+    let dir = temp_dir("aliasfirst");
+    let inner = image(6, 5, 0, 9);
+    let framed = |b: usize| {
+        let (w, h) = (6 + 2 * b, 5 + 2 * b);
+        let mut v = vec![0u8; w * h * 4];
+        for y in 0..5 {
+            let o = ((y + b) * w + b) * 4;
+            v[o..o + 24].copy_from_slice(&inner[y * 24..y * 24 + 24]);
+        }
+        (w as u32, h as u32, v)
+    };
+    let mut entries = Vec::new();
+    for (name, b) in [("a", 1), ("b", 1), ("c", 2), ("d", 2)] {
+        let (w, h, px) = framed(b);
+        write(&dir, name, w, h, &px);
+        entries.push(att("region", name, name));
+    }
+    let s = AtlasSettings { alias: true, rotation: false, ..AtlasSettings::default() };
+    let out = pack(&model(entries), &dir, "o", &s).unwrap();
+    let rs = rects(&out.atlas_text);
+    let at = |i: usize| (rs[i].1, rs[i].2);
+    assert_eq!(at(0), at(1), "a · b 는 한 자리");
+    assert!(at(2) != at(0) && at(3) != at(0) && at(2) != at(3), "c · d 는 따로: {}", out.atlas_text);
+    std::fs::remove_dir_all(&dir).ok();
+}

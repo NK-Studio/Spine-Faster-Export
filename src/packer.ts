@@ -50,6 +50,8 @@ export interface PackSettings {
   scaleSuffix: string[];
   /** 배율별 리샘플링 방식(Spine 이름). 모자라면 bicubic. */
   scaleResampling: string[];
+  /** 한 페이지에 다 들어갈 때까지 배율을 0.01 씩 낮춘다(Spine 의 Auto scale). */
+  autoScale: boolean;
   atlasExtension: string;
   combineSubdirectories: boolean;
   flattenPaths: boolean;
@@ -105,6 +107,7 @@ export function packSummary(p: PackSettings, unity = false): string {
       .map(([, m]) => RESAMPLINGS.find(([k]) => k === m)?.[1] ?? m);
     if (names.length) parts.push(t("리샘플링 {m}", { m: [...new Set(names)].join(", ") }));
   }
+  if (p.autoScale) parts.push(t("자동 배율"));
   parts.push(p.atlasExtension + (unity ? " (Unity)" : ""));
   return parts.join(" · ");
 }
@@ -265,6 +268,7 @@ export function openPackerDialog(
             ${chk("flattenPaths", t("경로 병합"), t("영역 이름에서 폴더를 뺍니다"))}
             ${chk("useIndexes", t("인덱스 사용"), t("이름 끝의 _숫자를 index 로 씁니다"))}
             ${chk("fast", t("빠르게"), t("덜 촘촘하지만 빨리 묶습니다"))}
+            ${chk("autoScale", t("자동 배율"), t("한 페이지에 다 들어갈 때까지 배율을 0.01 씩 낮춥니다(배율마다 다시 묶어서 느립니다). 줄인 배율은 atlas 의 scale 줄에 적힙니다"))}
             ${chk("debug", t("디버그"), t("영역 테두리를 분홍 선으로 그립니다"))}
             ${chk("prettyPrint", t("보기 좋게 쓰기"), t("atlas 를 탭으로 들여 쓰고 «size: 1024, 512» 처럼 띄어 씁니다(Spine 과 같은 글자). 런타임은 둘 다 읽습니다. 레거시 출력에는 쓰지 않습니다"))}
             ${chk("legacyOutput", t("레거시 출력"), t("3.8 이하 런타임이 읽는 옛 atlas 형식으로 씁니다. 3.8 로 내보내면 꺼져 있어도 옛 형식으로 씁니다"))}

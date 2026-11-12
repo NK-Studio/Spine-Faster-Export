@@ -553,7 +553,6 @@ pub fn import_spine_settings(text: &str, base: &ExportOptions) -> SpineResult<Im
             let pack: AtlasSettings = serde_json::from_value(obj["packAtlas"].clone()).map_err(|e| bad(format!("packAtlas: {e}")))?;
             o.pack = pack.normalize();
             o.atlas = true;
-            let p = &obj["packAtlas"];
             if o.pack.jpeg() {
                 o.pack.output_format = "jpg".into();
             } else if !o.pack.output_format.eq_ignore_ascii_case("png") {
@@ -564,9 +563,6 @@ pub fn import_spine_settings(text: &str, base: &ExportOptions) -> SpineResult<Im
                 if spine_atlas::Resampling::parse(m).is_none() {
                     notes.push(format!("모르는 리샘플링 «{m}» 은 bicubic 으로 바꿨습니다."));
                 }
-            }
-            if p.get("autoScale").and_then(Value::as_bool) == Some(true) {
-                notes.push("Auto scale 은 지원하지 않습니다.".into());
             }
         }
         Some(Value::Null) | None => o.atlas = false,

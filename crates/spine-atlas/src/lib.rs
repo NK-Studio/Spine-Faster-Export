@@ -152,6 +152,9 @@ pub struct AtlasSettings {
     pub scale_suffix: Vec<String>,
     /// 배율별 리샘플링 방식(Spine 이름: `auto` · `nearest` · `bilinear` · `bilinearProgressive` · `bicubic`). 모자라면 `bicubic`.
     pub scale_resampling: Vec<String>,
+    /// Auto scale: 묶음(폴더)이 한 페이지에 다 들어갈 때까지 배율을 0.01 씩 낮춘다(Spine 처럼 배율마다 다시 묶어 본다).
+    /// 줄인 배율은 atlas 의 `scale:` 줄에 적힌다.
+    pub auto_scale: bool,
     // Options
     pub atlas_extension: String,
     /// «이미지 폴더»로 묶을 때: 하위 폴더를 이 폴더의 페이지에 함께 묶는다(자기 `pack.json` 이 있는 하위 폴더는 따로).
@@ -215,6 +218,7 @@ impl Default for AtlasSettings {
             scale: vec![1.0],
             scale_suffix: vec![String::new()],
             scale_resampling: vec!["bicubic".into()],
+            auto_scale: false,
             atlas_extension: ".atlas".into(),
             combine_subdirectories: false,
             ignore: false,
@@ -354,9 +358,19 @@ impl Region {
     }
 }
 
-/// (left, top, w, h, 원본 w, 원본 h, 완전 투명 픽셀 RGB 를 지운 straight 픽셀, 다각형 패킹의 모양).
-#[derive(PartialEq, Eq, Hash)]
-struct AliasKey(i32, i32, i32, i32, i32, i32, Vec<u8>, Option<Vec<u8>>);
+/// 에일리어스로 견주는 그림 내용: (잘라낸 w, h, 완전 투명 픽셀 RGB 를 지운 straight 픽셀, 다각형 패킹의 모양).
+type AliasContent = (i32, i32, Vec<u8>, Option<Vec<u8>>);
+/// 그림을 실은 영역 → 그 자리를 함께 쓰는 영역들.
+type Aliases = HashMap<usize, Vec<usize>>;
+
+/// 에일리어스 비교 키. Spine 은 잘라낸 그림 내용(`content`)으로 처음 나온 영역을 기억하고, 같은 내용이 다시 나오면
+/// 자리(`place`: 오프셋 · 원본 크기)까지 그 처음 영역과 같을 때만 합친다. 자리가 다르면 따로 싣고 기억은 바꾸지 않는다
+/// (그래서 같은 내용 · 같은 자리여도 처음 영역과 자리가 다르면 서로 합치지 않는다. Spine 4.2.43 으로 확인).
+struct AliasKey {
+    content: AliasContent,
+    /// (left, top, 원본 w, 원본 h)
+    place: (i32, i32, i32, i32),
+}
 
 /// atlas 이름: Flatten paths 면 폴더를 빼고, Use indexes 면 끝의 `_숫자` 를 번호로 뗀다.
 fn atlas_name(name: &str, s: &AtlasSettings) -> (String, Option<i64>) {
@@ -434,7 +448,7 @@ fn build_region(name: String, w: i32, h: i32, rgba: &[u8], strip_x: bool, strip_
                 p[2] = 0;
             }
         }
-        Some(AliasKey(left, top, rw as i32, rh as i32, w, h, k, mask.clone()))
+        Some(AliasKey { content: (rw as i32, rh as i32, k, mask.clone()), place: (left, top, w, h) })
     } else {
         None
     };
@@ -1233,79 +1247,66 @@ fn pack_at(sources: &[Source], name: &str, root: &AtlasSettings, suffix: &str) -
         return Err(SpineError::Format("묶을 이미지가 없습니다".into()));
     }
 
-    // 이미지 읽기·잘라내기는 영역마다 독립이라 병렬로 한다(순서는 이름 순 그대로).
-    let loaded: Vec<SpineResult<(Region, bool, bool)>> = picked
-        .par_iter()
-        .map(|&(src, settings, scale, method)| {
-            let (rn, path) = (&src.name, &src.path);
-            if !path.is_file() {
-                let (r, _) = build_region(rn.clone(), 1, 1, &[0u8; 4], false, false, None, false, settings);
-                return Ok((r, true, false));
-            }
-            let (w, h, mut rgba) = png_codec::decode_file(path)?;
-            let (mut w, mut h) = (w as i32, h as i32);
-            // 반올림하기 전의 배율 크기(메시 범위를 Spine 처럼 이 크기로 구한다)
-            let exact = (scale != 1.0).then(|| ((w as f32 * scale) as f64, (h as f32 * scale) as f64));
-            if scale != 1.0 {
-                let (nw, nh, px) = resize::resize(w as usize, h as usize, &rgba, scale, method);
-                (w, h, rgba) = (nw as i32, nh as i32, px);
-            }
-            // 메시만 쓰는 이미지는 패킹 방식과 상관없이 메시가 걸친 범위로 자른다
-            let shape = polygon::raster_tris_scaled(w as usize, h as usize, exact, &src.tris);
-            let strip = !src.mesh || shape.is_some();
-            let (sx, sy) = (settings.strip_whitespace_x, settings.strip_whitespace_y);
-            let (r, blank) = build_region(rn.clone(), w, h, &rgba, strip && sx, strip && sy, shape, settings.polygons(), settings);
-            Ok((r, false, blank))
-        })
-        .collect();
-    let mut regions = Vec::with_capacity(loaded.len());
-    // 영역마다 (묶음 경로, 설정, 배율)
-    let mut owners: Vec<(&str, &AtlasSettings, f32)> = Vec::with_capacity(loaded.len());
-    let mut missing = Vec::new();
-    let mut ignored = Vec::new();
-    for (item, &(src, settings, scale, _)) in loaded.into_iter().zip(&picked) {
-        let (r, miss, blank) = item?;
-        if miss {
-            missing.push(r.name.clone());
-        } else if blank && settings.ignore_blank_images {
-            ignored.push(r.name.clone());
-            continue;
-        }
-        regions.push(r);
-        owners.push((src.group.as_deref().unwrap_or(""), settings, scale));
-    }
-    if regions.is_empty() {
-        return Err(SpineError::Format("묶을 이미지가 없습니다(모두 투명해서 뺐습니다)".into()));
-    }
-
     // 묶음(폴더)마다 페이지를 따로 쓴다. Spine 처럼 폴더 나무를 깊이 우선으로: 경로 조각을 Ordinal 순으로 견준다.
     let mut by_group: std::collections::BTreeMap<Vec<&str>, Vec<usize>> = Default::default();
-    for (i, (group, ..)) in owners.iter().enumerate() {
-        by_group.entry(group.split('/').filter(|c| !c.is_empty()).collect()).or_default().push(i);
+    for (i, (src, ..)) in picked.iter().enumerate() {
+        by_group.entry(src.group.as_deref().unwrap_or("").split('/').filter(|c| !c.is_empty()).collect()).or_default().push(i);
     }
 
+    let mut regions: Vec<Region> = Vec::with_capacity(picked.len());
+    // (picked 번호, 이름): 끝에 이름 순(picked 순)으로 돌려준다
+    let mut missing: Vec<(usize, String)> = Vec::new();
+    let mut ignored: Vec<(usize, String)> = Vec::new();
     // 같은 그림은 한 자리에(묶음 안에서): 이름순 첫 영역을 싣고 나머지는 그 자리를 함께 쓴다
     let mut aliases: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut pages: Vec<(Page, &AtlasSettings, f32)> = Vec::new();
     for ids in by_group.values() {
-        let (_, settings, scale) = owners[ids[0]];
-        let mut packed: Vec<usize> = Vec::with_capacity(ids.len());
-        if settings.alias {
-            let mut first: HashMap<&AliasKey, usize> = HashMap::new();
-            for &i in ids {
-                let rep = *first.entry(regions[i].key.as_ref().unwrap()).or_insert(i);
-                if rep == i {
-                    packed.push(i);
-                } else {
-                    aliases.entry(rep).or_default().push(i);
+        let (_, settings, first_scale, method) = picked[ids[0]];
+        // 그림은 한 번만 읽는다(Auto scale 은 배율을 바꿔 가며 다시 묶는다). 영역마다 독립이라 병렬로.
+        let images: Vec<Option<(i32, i32, Vec<u8>)>> = ids
+            .par_iter()
+            .map(|&i| {
+                let path = &picked[i].0.path;
+                if !path.is_file() {
+                    return Ok(None);
                 }
+                let (w, h, rgba) = png_codec::decode_file(path)?;
+                Ok(Some((w as i32, h as i32, rgba)))
+            })
+            .collect::<SpineResult<_>>()?;
+        let mut scale = first_scale;
+        loop {
+            let mut unit = load_unit(&picked, ids, &images, scale, method, settings);
+            let (unit_pages, unit_aliases) = pack_unit(&mut unit.regions, settings)?;
+            // Auto scale: Spine 처럼 한 페이지에 다 들어갈 때까지 배율을 0.01 씩 낮춰 다시 묶는다
+            if settings.auto_scale && unit_pages.len() > 1 {
+                scale = next_auto_scale(scale)?;
+                continue;
             }
-        } else {
-            packed.extend(ids);
+            let base = regions.len();
+            missing.extend(unit.missing);
+            ignored.extend(unit.ignored);
+            regions.extend(unit.regions);
+            for (rep, list) in unit_aliases {
+                aliases.insert(base + rep, list.into_iter().map(|i| base + i).collect());
+            }
+            for mut p in unit_pages {
+                for r in p.regions.iter_mut() {
+                    *r += base;
+                }
+                pages.push((p, settings, scale));
+            }
+            break;
         }
-        let group_pages = pack_group(&mut regions, &packed, settings)?;
-        pages.extend(group_pages.into_iter().map(|p| (p, settings, scale)));
     }
+    if regions.is_empty() {
+        return Err(SpineError::Format("묶을 이미지가 없습니다(모두 투명해서 뺐습니다)".into()));
+    }
+    missing.sort();
+    ignored.sort();
+    let missing: Vec<String> = missing.into_iter().map(|(_, n)| n).collect();
+    let ignored: Vec<String> = ignored.into_iter().map(|(_, n)| n).collect();
+
     for r in regions.iter_mut() {
         r.key = None;
     }
@@ -1353,6 +1354,97 @@ fn pack_at(sources: &[Source], name: &str, root: &AtlasSettings, suffix: &str) -
     }
 
     Ok(PackResult { output: AtlasOutput { atlas_text: text, pages: out_pages }, missing, ignored })
+}
+
+/// 묶음 하나를 한 배율로 읽은 것.
+struct Unit {
+    regions: Vec<Region>,
+    missing: Vec<(usize, String)>,
+    ignored: Vec<(usize, String)>,
+}
+
+/// 묶음 하나(ids: picked 번호)의 그림을 배율 scale 로 줄이고 잘라 영역으로 만든다. 영역마다 독립이라 병렬로 한다(순서는 이름 순 그대로).
+fn load_unit(picked: &[(&Source, &AtlasSettings, f32, Resampling)], ids: &[usize], images: &[Option<(i32, i32, Vec<u8>)>], scale: f32, method: Resampling, settings: &AtlasSettings) -> Unit {
+    let built: Vec<(Region, bool, bool)> = ids
+        .par_iter()
+        .zip(images)
+        .map(|(&i, image)| {
+            let src = picked[i].0;
+            let rn = &src.name;
+            let Some((w, h, rgba)) = image else {
+                let (r, _) = build_region(rn.clone(), 1, 1, &[0u8; 4], false, false, None, false, settings);
+                return (r, true, false);
+            };
+            let (mut w, mut h) = (*w, *h);
+            // 반올림하기 전의 배율 크기(메시 범위를 Spine 처럼 이 크기로 구한다)
+            let exact = (scale != 1.0).then(|| ((w as f32 * scale) as f64, (h as f32 * scale) as f64));
+            let scaled;
+            let rgba: &[u8] = if scale != 1.0 {
+                let (nw, nh, px) = resize::resize(w as usize, h as usize, rgba, scale, method);
+                (w, h, scaled) = (nw as i32, nh as i32, px);
+                &scaled
+            } else {
+                rgba
+            };
+            // 메시만 쓰는 이미지는 패킹 방식과 상관없이 메시가 걸친 범위로 자른다
+            let shape = polygon::raster_tris_scaled(w as usize, h as usize, exact, &src.tris);
+            let strip = !src.mesh || shape.is_some();
+            let (sx, sy) = (settings.strip_whitespace_x, settings.strip_whitespace_y);
+            let (r, blank) = build_region(rn.clone(), w, h, rgba, strip && sx, strip && sy, shape, settings.polygons(), settings);
+            (r, false, blank)
+        })
+        .collect();
+    let mut unit = Unit { regions: Vec::with_capacity(built.len()), missing: Vec::new(), ignored: Vec::new() };
+    for ((r, miss, blank), &i) in built.into_iter().zip(ids) {
+        if miss {
+            unit.missing.push((i, r.name.clone()));
+        } else if blank && settings.ignore_blank_images {
+            unit.ignored.push((i, r.name.clone()));
+            continue;
+        }
+        unit.regions.push(r);
+    }
+    unit
+}
+
+/// Auto scale 의 다음 배율: Spine 처럼 0.01 단위로 내린다(f32, 반올림 뒤 1 을 뺀다: 0.705 → 0.7, 0.703 → 0.69).
+/// 0 이 되면 Spine 처럼 멈춘다.
+fn next_auto_scale(scale: f32) -> SpineResult<f32> {
+    let n = (scale * 100.0 + 0.5).floor() - 1.0;
+    if n <= 0.0 {
+        return Err(SpineError::Format("Auto scale: 배율을 0.01 까지 줄여도 이미지가 한 페이지에 들어가지 않습니다".into()));
+    }
+    Ok(n / 100.0)
+}
+
+/// 묶음 하나의 영역을 페이지로 나눠 놓는다. 같은 그림(Alias)은 이름순 첫 영역만 싣고, 그 영역 → 나머지 목록을 함께 돌려준다.
+fn pack_unit(regions: &mut [Region], settings: &AtlasSettings) -> SpineResult<(Vec<Page>, Aliases)> {
+    let mut aliases = Aliases::new();
+    if regions.is_empty() {
+        return Ok((Vec::new(), aliases));
+    }
+    let mut packed: Vec<usize> = Vec::with_capacity(regions.len());
+    if settings.alias {
+        // 처음 영역은 Spine 처럼 이름 Ordinal 순으로 정한다
+        let mut order: Vec<usize> = (0..regions.len()).collect();
+        order.sort_by(|&a, &b| natural::ordinal_cmp(&regions[a].name, &regions[b].name));
+        let mut first: HashMap<&AliasContent, usize> = HashMap::new();
+        for i in order {
+            let key = regions[i].key.as_ref().unwrap();
+            match first.get(&key.content) {
+                Some(&rep) if regions[rep].key.as_ref().unwrap().place == key.place => aliases.entry(rep).or_default().push(i),
+                Some(_) => packed.push(i),
+                None => {
+                    first.insert(&key.content, i);
+                    packed.push(i);
+                }
+            }
+        }
+    } else {
+        packed.extend(0..regions.len());
+    }
+    let pages = pack_group(regions, &packed, settings)?;
+    Ok((pages, aliases))
 }
 
 /// 묶음 하나(같은 설정)의 영역을 페이지로 나눠 놓는다.

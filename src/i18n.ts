@@ -265,6 +265,8 @@ const en: Record<string, string> = {
   "디버그": "Debug",
   "레거시 출력": "Legacy output",
   "보기 좋게 쓰기": "Pretty print",
+  "자동 배율": "Auto scale",
+  "한 페이지에 다 들어갈 때까지 배율을 0.01 씩 낮춥니다(배율마다 다시 묶어서 느립니다). 줄인 배율은 atlas 의 scale 줄에 적힙니다": "Lowers the scale by 0.01 until everything fits on one page (slow: repacks at each scale). The reduced scale is written to the atlas scale line",
   "로드": "Load",
   "확인": "OK",
   "이 알파 이하는 투명으로 보고 잘라냅니다": "Alpha at or below this is treated as transparent and trimmed",

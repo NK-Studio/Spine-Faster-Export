@@ -115,6 +115,7 @@ const DEFAULT_PACK: PackSettings = {
   scale: [1],
   scaleSuffix: [""],
   scaleResampling: ["bicubic"],
+  autoScale: false,
   atlasExtension: ".atlas",
   combineSubdirectories: false,
   flattenPaths: false,
