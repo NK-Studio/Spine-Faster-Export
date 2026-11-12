@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::Serialize;
-use spine_export::{export_skeleton, AtlasSettings, ExportOptions, ExportReport, SpineProject};
+use spine_export::{AtlasSettings, ExportOptions, ExportReport, SpineProject};
 use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
@@ -116,50 +116,25 @@ async fn export_skeletons(
     if !options.version.trim().is_empty() {
         spine_export::check_version(options.version.trim()).map_err(|e| e.to_string())?;
     }
-    let options = spine_export::options_for(&loaded.project, &options);
     let out = PathBuf::from(&out_dir);
     let start = Instant::now();
-    let names = loaded.project.skeleton_names();
-    let single = spine_export::wants_single_atlas(&options);
-    let all_indices = indices.clone();
-    let total = indices.len() + usize::from(single);
     let (succeeded, failed) = tauri::async_runtime::spawn_blocking(move || {
-        let done = std::sync::atomic::AtomicUsize::new(0);
-        let results: Mutex<(usize, usize)> = Mutex::new((0, 0));
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(total).max(1);
-        let report = |index: Option<usize>, skeleton: String, result: spine_export::SpineResult<ExportReport>| {
-            let n = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-            let progress = match result {
-                Ok(ExportReport { files, notes, .. }) => {
-                    results.lock().unwrap().0 += 1;
-                    ExportProgress { index, skeleton, ok: true, message: None, files: files.iter().map(|f| display_name(f)).collect(), notes, done: n, total }
-                }
-                Err(e) => {
-                    results.lock().unwrap().1 += 1;
-                    ExportProgress { index, skeleton, ok: false, message: Some(e.to_string()), files: vec![], notes: vec![], done: n, total }
-                }
+        spine_export::export_many(&loaded.project, &loaded.path, &indices, &out, &options, |item| {
+            let progress = match item.result {
+                Ok(ExportReport { files, notes, .. }) => ExportProgress {
+                    index: item.index,
+                    skeleton: item.label,
+                    ok: true,
+                    message: None,
+                    files: files.iter().map(|f| display_name(f)).collect(),
+                    notes,
+                    done: item.done,
+                    total: item.total,
+                },
+                Err(e) => ExportProgress { index: item.index, skeleton: item.label, ok: false, message: Some(e.to_string()), files: vec![], notes: vec![], done: item.done, total: item.total },
             };
             let _ = app.emit("export-progress", progress);
-        };
-        let queue = Mutex::new(indices.into_iter());
-        std::thread::scope(|scope| {
-            for _ in 0..threads {
-                scope.spawn(|| loop {
-                    let Some(index) = queue.lock().unwrap().next() else { break };
-                    let result = export_skeleton(&loaded.project, index, &loaded.path, &out, &options);
-                    report(Some(index), names.get(index).cloned().unwrap_or_default(), result);
-                });
-            }
-            if single {
-                // 모든 스켈레톤의 이미지를 atlas 하나로(프로젝트 파일 이름)
-                scope.spawn(|| {
-                    let result = spine_export::export_single_atlas(&loaded.project, &all_indices, &loaded.path, &out, &options);
-                    let label = format!("{}{}", spine_export::single_atlas_name(&loaded.path), options.pack.atlas_extension);
-                    report(None, label, result);
-                });
-            }
-        });
-        results.into_inner().unwrap()
+        })
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -174,26 +149,10 @@ fn display_name(p: &Path) -> String {
 #[tauri::command]
 fn existing_outputs(indices: Vec<usize>, out_dir: String, options: ExportOptions, state: State<'_, AppState>) -> Result<Vec<String>, String> {
     let loaded = current(&state)?;
-    let options = spine_export::options_for(&loaded.project, &options);
-    let names = loaded.project.skeleton_names();
-    let out = PathBuf::from(&out_dir);
-    if !out.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut files: Vec<String> = indices
-        .iter()
-        .filter_map(|&i| names.get(i))
-        .flat_map(|n| spine_export::existing_outputs(n, &out, &options))
-        .chain(if spine_export::wants_single_atlas(&options) && !indices.is_empty() {
-            spine_export::existing_atlas_outputs(&spine_export::single_atlas_name(&loaded.path), &out, &options)
-        } else {
-            Vec::new()
-        })
-        .map(|p| display_name(&p))
-        .collect();
-    files.sort();
-    files.dedup();
-    Ok(files)
+    let files = spine_export::existing_outputs_for(&loaded.project, &loaded.path, &indices, &PathBuf::from(&out_dir), &options);
+    let mut names: Vec<String> = files.iter().map(|p| display_name(p)).collect();
+    names.dedup();
+    Ok(names)
 }
 
 #[tauri::command]
@@ -231,17 +190,8 @@ fn project_export_settings(options: ExportOptions, state: State<'_, AppState>) -
     Ok(Some(got))
 }
 
-/// Spine 이 적은 출력 폴더 → 이 컴퓨터의 절대 경로. 상대 경로는 프로젝트 폴더 기준. 다른 OS 의 절대 경로면 None.
 fn resolve_output(project: &Path, out: &str) -> Option<String> {
-    let b = out.as_bytes();
-    let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
-    let foreign = if cfg!(windows) { out.starts_with('/') && !out.starts_with("//") } else { drive || out.starts_with('\\') };
-    if foreign {
-        return None;
-    }
-    let p = Path::new(out);
-    let full = if p.is_absolute() { p.to_path_buf() } else { project.parent().unwrap_or(Path::new(".")).join(p) };
-    Some(full.display().to_string())
+    spine_export::resolve_output(project, out).map(|p| p.display().to_string())
 }
 
 /// 지금 설정을 Spine 의 내보내기 설정 JSON 으로 저장한다(Spine 의 Load · CLI `--export` 로 읽을 수 있다).

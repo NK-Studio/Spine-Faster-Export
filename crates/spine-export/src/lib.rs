@@ -14,6 +14,8 @@ use spine_atlas::Source;
 pub use spine_model::{AtlasOutput, AtlasPage, SkeletonModel, SpineError, SpineResult};
 pub use spine_project::SpineProject;
 
+pub mod cli;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SkeletonFormat {
@@ -484,6 +486,124 @@ pub fn existing_atlas_outputs(base_name: &str, out_dir: &Path, opts: &ExportOpti
     found
 }
 
+// ---------------------------------------------------------------- 여러 스켈레톤 병렬 내보내기
+
+/// [`export_many`] 가 하나를 끝낼 때마다 넘기는 것.
+pub struct BatchItem {
+    /// 스켈레톤 번호. 여러 스켈레톤을 묶은 아틀라스(Single atlas)는 None.
+    pub index: Option<usize>,
+    /// 스켈레톤 이름(Single atlas 면 atlas 파일 이름).
+    pub label: String,
+    pub result: SpineResult<ExportReport>,
+    /// 지금까지 끝난 수(이것 포함)와 모두의 수.
+    pub done: usize,
+    pub total: usize,
+}
+
+/// 고른 스켈레톤을 CPU 수만큼 나눠 병렬로 내보낸다. Single atlas 면 묶은 atlas 도 하나 더 만든다.
+/// 하나 끝날 때마다 `on_done` 을 부르고(여러 스레드에서), (성공 수, 실패 수)를 돌려준다.
+pub fn export_many<F: Fn(BatchItem) + Sync>(
+    project: &SpineProject,
+    spine_path: &Path,
+    indices: &[usize],
+    out_dir: &Path,
+    opts: &ExportOptions,
+    on_done: F,
+) -> (usize, usize) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    let opts = options_for(project, opts);
+    let names = project.skeleton_names();
+    let single = wants_single_atlas(&opts);
+    let total = indices.len() + usize::from(single && !indices.is_empty());
+    if total == 0 {
+        return (0, 0);
+    }
+    let done = AtomicUsize::new(0);
+    let counts = Mutex::new((0usize, 0usize));
+    let report = |index: Option<usize>, label: String, result: SpineResult<ExportReport>| {
+        {
+            let mut c = counts.lock().unwrap();
+            if result.is_ok() {
+                c.0 += 1;
+            } else {
+                c.1 += 1;
+            }
+        }
+        let n = done.fetch_add(1, Ordering::SeqCst) + 1;
+        on_done(BatchItem { index, label, result, done: n, total });
+    };
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(total).max(1);
+    let queue = Mutex::new(indices.iter().copied());
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                let Some(index) = queue.lock().unwrap().next() else { break };
+                let result = export_skeleton(project, index, spine_path, out_dir, &opts);
+                report(Some(index), names.get(index).cloned().unwrap_or_default(), result);
+            });
+        }
+        if single && !indices.is_empty() {
+            // 모든 스켈레톤의 이미지를 atlas 하나로(프로젝트 파일 이름)
+            scope.spawn(|| {
+                let result = export_single_atlas(project, indices, spine_path, out_dir, &opts);
+                report(None, format!("{}{}", single_atlas_name(spine_path), opts.pack.atlas_extension), result);
+            });
+        }
+    });
+    counts.into_inner().unwrap()
+}
+
+/// 고른 스켈레톤을 내보내면 덮어쓸, 이미 있는 파일(정렬, 중복 없음).
+pub fn existing_outputs_for(project: &SpineProject, spine_path: &Path, indices: &[usize], out_dir: &Path, opts: &ExportOptions) -> Vec<PathBuf> {
+    if !out_dir.is_dir() {
+        return Vec::new();
+    }
+    let opts = options_for(project, opts);
+    let names = project.skeleton_names();
+    let mut files: Vec<PathBuf> = indices.iter().filter_map(|&i| names.get(i)).flat_map(|n| existing_outputs(n, out_dir, &opts)).collect();
+    if wants_single_atlas(&opts) && !indices.is_empty() {
+        files.extend(existing_atlas_outputs(&single_atlas_name(spine_path), out_dir, &opts));
+    }
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// Spine 이 설정에 적은 출력 폴더 → 이 컴퓨터의 절대 경로. 상대 경로는 프로젝트 폴더 기준.
+/// 다른 OS 의 절대 경로(맥에서 `E:/…`, 윈도우에서 `/Users/…`)면 None.
+pub fn resolve_output(project_path: &Path, out: &str) -> Option<PathBuf> {
+    let b = out.as_bytes();
+    let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
+    let foreign = if cfg!(windows) { out.starts_with('/') && !out.starts_with("//") } else { drive || out.starts_with('\\') };
+    if foreign {
+        return None;
+    }
+    let p = Path::new(out);
+    Some(if p.is_absolute() { p.to_path_buf() } else { project_path.parent().unwrap_or(Path::new(".")).join(p) })
+}
+
+/// 화면에서 고를 수 있는 런타임 버전(새것부터).
+pub const KNOWN_VERSIONS: [&str; 5] = ["4.3.26", "4.2.43", "4.1.24", "4.0.64", "3.8.99"];
+
+/// Spine 설정 파일의 Version(예: "4.1", "4.2.43") → 내보낼 버전. 프로젝트와 같은 major.minor 면 ""(프로젝트 버전).
+/// 읽을 수 없으면 None.
+pub fn version_from_spine(v: &str, project_format: &str) -> Option<String> {
+    let parts: Vec<&str> = v.trim().split('.').collect();
+    let num = |s: &&str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if parts.len() < 2 || !parts[..2].iter().all(num) {
+        return None;
+    }
+    if parts.len() >= 3 && num(&parts[2]) {
+        return Some(parts[..3].join("."));
+    }
+    let mm = format!("{}.{}.", parts[0], parts[1]);
+    if project_format.starts_with(&mm) {
+        return Some(String::new());
+    }
+    Some(KNOWN_VERSIONS.iter().find(|k| k.starts_with(&mm)).map(|k| k.to_string()).unwrap_or_else(|| format!("{mm}0")))
+}
+
 // ---------------------------------------------------------------- Spine 내보내기 설정 파일
 
 /// Spine 의 내보내기 설정 JSON(Export 대화상자의 Save)에서 읽은 것.
@@ -625,7 +745,7 @@ pub fn export_spine_settings(opts: &ExportOptions, input: Option<&str>, output: 
     serde_json::to_string_pretty(&Value::Object(m)).map_err(|e| SpineError::Format(e.to_string()))
 }
 
-fn short_list(names: &[String]) -> String {
+pub(crate) fn short_list(names: &[String]) -> String {
     let shown: Vec<&str> = names.iter().take(5).map(String::as_str).collect();
     let more = if names.len() > 5 { format!(" 외 {}개", names.len() - 5) } else { String::new() };
     format!("{}{more}", shown.join(", "))
@@ -638,6 +758,31 @@ fn missing_note(missing: &[String], images: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spine 설정의 Version → 내보낼 버전(앱의 versionFromSpine 과 같은 규칙).
+    #[test]
+    fn version_from_spine_rules() {
+        assert_eq!(version_from_spine("4.2.43", "4.2.43").as_deref(), Some("4.2.43"));
+        assert_eq!(version_from_spine("4.2", "4.2.43").as_deref(), Some("")); // 프로젝트와 같으면 프로젝트 버전
+        assert_eq!(version_from_spine("4.1", "4.2.43").as_deref(), Some("4.1.24"));
+        assert_eq!(version_from_spine("3.8", "4.2.43").as_deref(), Some("3.8.99"));
+        assert_eq!(version_from_spine("5.0", "4.2.43").as_deref(), Some("5.0.0"));
+        assert_eq!(version_from_spine("", "4.2.43"), None);
+        assert_eq!(version_from_spine("latest", "4.2.43"), None);
+    }
+
+    /// 다른 OS 의 절대 경로는 버리고, 상대 경로는 프로젝트 폴더 기준.
+    #[test]
+    fn resolve_output_rules() {
+        let proj = Path::new("/p/a.spine");
+        if cfg!(windows) {
+            assert_eq!(resolve_output(proj, "/Users/x"), None);
+        } else {
+            assert_eq!(resolve_output(proj, "E:/out"), None);
+            assert_eq!(resolve_output(proj, "out"), Some(PathBuf::from("/p/out")));
+            assert_eq!(resolve_output(proj, "/abs"), Some(PathBuf::from("/abs")));
+        }
+    }
 
     /// atlas 머리말은 3.8 프로젝트를 3.8 로 내보낼 때만 Spine 3.8 편집기의 글자를 따른다.
     #[test]
