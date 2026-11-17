@@ -523,7 +523,7 @@ pub fn export_many<F: Fn(BatchItem) + Sync>(
     let counts = Mutex::new((0usize, 0usize));
     let report = |index: Option<usize>, label: String, result: SpineResult<ExportReport>| {
         {
-            let mut c = counts.lock().unwrap();
+            let mut c = counts.lock().unwrap_or_else(|e| e.into_inner());
             if result.is_ok() {
                 c.0 += 1;
             } else {
@@ -538,20 +538,33 @@ pub fn export_many<F: Fn(BatchItem) + Sync>(
     std::thread::scope(|scope| {
         for _ in 0..threads {
             scope.spawn(|| loop {
-                let Some(index) = queue.lock().unwrap().next() else { break };
-                let result = export_skeleton(project, index, spine_path, out_dir, &opts);
+                let Some(index) = queue.lock().unwrap_or_else(|e| e.into_inner()).next() else { break };
+                let result = isolated(|| export_skeleton(project, index, spine_path, out_dir, &opts));
                 report(Some(index), names.get(index).cloned().unwrap_or_default(), result);
             });
         }
         if single && !indices.is_empty() {
             // 모든 스켈레톤의 이미지를 atlas 하나로(프로젝트 파일 이름)
             scope.spawn(|| {
-                let result = export_single_atlas(project, indices, spine_path, out_dir, &opts);
+                let result = isolated(|| export_single_atlas(project, indices, spine_path, out_dir, &opts));
                 report(None, format!("{}{}", single_atlas_name(spine_path), opts.pack.atlas_extension), result);
             });
         }
     });
-    counts.into_inner().unwrap()
+    counts.into_inner().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 한 작업의 panic 을 그 작업의 오류로 바꾼다. 스켈레톤 하나가 panic 해도 나머지는 끝까지 내보내고,
+/// 명령줄은 문서에 적은 종료 코드(1 일부 실패)와 `--json` 결과를 그대로 낸다.
+fn isolated<T>(work: impl FnOnce() -> SpineResult<T>) -> SpineResult<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|payload| {
+        let detail = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        Err(SpineError::Format(format!("내부 오류로 내보내지 못했습니다: {detail}")))
+    })
 }
 
 /// 고른 스켈레톤을 내보내면 덮어쓸, 이미 있는 파일(정렬, 중복 없음).
@@ -758,6 +771,13 @@ fn missing_note(missing: &[String], images: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panic_becomes_error() {
+        let r: SpineResult<()> = isolated(|| panic!("boom"));
+        assert!(matches!(r, Err(SpineError::Format(m)) if m.contains("boom")));
+        assert!(isolated(|| Ok(1)).is_ok());
+    }
 
     /// Spine 설정의 Version → 내보낼 버전(앱의 versionFromSpine 과 같은 규칙).
     #[test]

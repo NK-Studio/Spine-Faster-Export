@@ -180,6 +180,12 @@ fn errors() {
     let dir = temp_dir("err");
     assert!(pack(&model(vec![]), &dir, "x", &AtlasSettings::default()).is_err());
     assert!(pack(&model(vec![att("region", "a", "")]), &dir.join("none"), "x", &AtlasSettings::default()).is_err());
+    // 큰 페이지·큰 배율은 할당하기 전에 오류로(abort 되지 않게)
+    assert!(AtlasSettings { max_width: 100_000, ..AtlasSettings::default() }.check().is_err());
+    assert!(AtlasSettings { max_width: MAX_PAGE_SIZE, max_height: MAX_PAGE_SIZE, ..AtlasSettings::default() }.check().is_ok());
+    write(&dir, "a", 2048, 2048, &image(2048, 2048, 0, 1));
+    let big = AtlasSettings { scale: vec![50.0], ..AtlasSettings::default() };
+    assert!(pack_scales(&model(vec![att("region", "a", "")]), &dir, "x", &big).is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

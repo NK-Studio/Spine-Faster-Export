@@ -1369,8 +1369,9 @@ impl<'a> Writer<'a> {
             let mut v0 = 0.0;
             let mut v1 = 1.0; // 값 없는 타임라인(변형 등): 곡선은 0→1 비율
             if !kv.is_empty() {
-                v0 = kv[c];
-                v1 = nv[c];
+                // 채널보다 값이 적은 키(망가진 프로젝트)는 0 으로 본다(panic 하지 않게)
+                v0 = kv.get(c).copied().unwrap_or(0.0);
+                v1 = nv.get(c).copied().unwrap_or(0.0);
             }
             let h0 = kh.get(c);
             let h1 = nh.get(c);

@@ -257,13 +257,17 @@ impl<'a> View<'a> {
                 Ok(Leaf::Boxed(v))
             }
             Kind::DefVtx | Kind::DefVtx0 => {
-                let total = self.varint(&mut p)? as i32;
-                let chunks = self.varint(&mut p)? as i32;
-                if total < 0 || total as usize > self.body.len().saturating_mul(128) {
+                let total = self.varint(&mut p)?;
+                let chunks = self.varint(&mut p)?;
+                // 묶음마다 머리 바이트가 하나씩 있다. 뒤쪽 0 묶음은 생략되므로 total 은 128 × chunks 보다 클 수 있다.
+                // 파일 값으로 큰 배열을 만들지 않도록 할당 전에 묶는다(할당 실패는 abort 라 catch_unwind 로 잡히지 않는다).
+                const MAX_VALUES: i64 = 1 << 24;
+                let remaining = self.body.len().saturating_sub(p) as i64;
+                if total < 0 || chunks < 0 || chunks > remaining || total > MAX_VALUES {
                     return Err(broken("인덱스가 배열 범위를 벗어났습니다"));
                 }
                 let mut out = vec![0.0f64; total as usize];
-                for i in 0..chunks.max(0) {
+                for i in 0..chunks {
                     let head = self.byte(p)?;
                     p += 1;
                     if head != 0 || kind == Kind::DefVtx {

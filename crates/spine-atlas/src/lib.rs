@@ -309,6 +309,10 @@ impl AtlasSettings {
         if self.max_width < 16 || self.max_height < 16 {
             return Err(SpineError::Usage("최대 폭·높이는 16 이상이어야 합니다.".into()));
         }
+        // 페이지 하나를 w×h×4 바이트로 만든다. 상한이 없으면 큰 값이 수십 GB 를 할당하다 abort 된다
+        if self.max_width > MAX_PAGE_SIZE || self.max_height > MAX_PAGE_SIZE {
+            return Err(SpineError::Usage(format!("최대 폭·높이는 {MAX_PAGE_SIZE} 이하여야 합니다.")));
+        }
         if self.min_width > self.max_width || self.min_height > self.max_height {
             return Err(SpineError::Usage("최소 크기가 최대 크기보다 큽니다.".into()));
         }
@@ -324,6 +328,9 @@ impl AtlasSettings {
         Ok(())
     }
 }
+
+/// 최대 페이지 폭·높이 상한(GPU 텍스처 크기 한계로 흔한 값).
+pub const MAX_PAGE_SIZE: u32 = 16384;
 
 // ---------------------------------------------------------------- 영역
 
@@ -1276,6 +1283,15 @@ fn pack_at(sources: &[Source], name: &str, root: &AtlasSettings, suffix: &str) -
             .collect::<SpineResult<_>>()?;
         let mut scale = first_scale;
         loop {
+            // 배율을 적용한 크기도 디코더와 같은 상한으로 묶는다(큰 배율이 수십 GB 를 할당하다 abort 되지 않게)
+            for (&i, image) in ids.iter().zip(&images) {
+                if let Some((w, h, _)) = image {
+                    let (nw, nh) = resize::scaled_size(*w as usize, *h as usize, scale);
+                    if nw > 65536 || nh > 65536 || (nw as u64) * (nh as u64) * 4 > i32::MAX as u64 {
+                        return Err(SpineError::Usage(format!("배율 {scale} 을 적용하면 이미지가 너무 커집니다({nw}×{nh}): {}", picked[i].0.name)));
+                    }
+                }
+            }
             let mut unit = load_unit(&picked, ids, &images, scale, method, settings);
             let (unit_pages, unit_aliases) = pack_unit(&mut unit.regions, settings)?;
             // Auto scale: Spine 처럼 한 페이지에 다 들어갈 때까지 배율을 0.01 씩 낮춰 다시 묶는다

@@ -1980,7 +1980,8 @@ impl<'a> Writer<'a> {
         let mut hs = Vec::with_capacity(nch);
         for c in 0..nch {
             let (v0, v1) = if !kv.is_empty() {
-                (kv[c], nv[c])
+                // 채널보다 값이 적은 키(망가진 프로젝트)는 0 으로 본다(panic 하지 않게)
+                (kv.get(c).copied().unwrap_or(0.0), nv.get(c).copied().unwrap_or(0.0))
             } else {
                 (0.0, 1.0)
             };
