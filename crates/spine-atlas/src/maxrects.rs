@@ -527,6 +527,10 @@ struct Quick {
     top: Map<Vec<R>>,
     used: Vec<R>,
     removed: Vec<u32>,
+    /// `full` 을 빨리 찾으려고 정렬해 둔 빈칸(이 방법일 때만). ContactPoint 는 쓰지 않는다.
+    indexed: Option<Method>,
+    by_a: Vec<(R, u32)>,
+    by_b: Vec<(R, u32)>,
 }
 
 impl Quick {
@@ -547,7 +551,113 @@ impl Quick {
             top: Map::default(),
             used: Vec::new(),
             removed: Vec::new(),
+            indexed: None,
+            by_a: Vec::new(),
+            by_b: Vec::new(),
         }
+    }
+
+    /// 방법 m 의 `full` 을 정렬한 빈칸으로 찾게 한다(결과는 모두 훑는 것과 같다).
+    fn index_for(&mut self, m: Method) {
+        self.indexed = (m != Method::ContactPoint).then_some(m);
+        self.reindex();
+    }
+
+    fn reindex(&mut self) {
+        let Some(m) = self.indexed else { return };
+        let entries = || self.free.iter().copied().zip(self.ids.iter().copied());
+        let mut a: Vec<(R, u32)> = entries().collect();
+        match m {
+            Method::BestShortSideFit => {
+                let mut b = a.clone();
+                a.sort_unstable_by_key(|e| e.0.w);
+                b.sort_unstable_by_key(|e| e.0.h);
+                self.by_b = b;
+            }
+            Method::BestLongSideFit => a.sort_unstable_by_key(|e| e.0.w),
+            Method::BestAreaFit => a.sort_unstable_by_key(|e| e.0.w as i64 * e.0.h as i64),
+            Method::BottomLeft => a.sort_unstable_by_key(|e| e.0.y),
+            Method::ContactPoint => {}
+        }
+        self.by_a = a;
+    }
+
+    /// 빈칸 하나(번호 id)의 한 방향을 지금 기억과 견준다(`offer` 와 같은 비교).
+    fn consider(&self, m: Method, (f, id): (R, u32), (cw, ch, rot): (i32, i32, bool), it: &Item, c: &mut Cache) {
+        if let Some((key, node)) = self.cand(m, f, cw, ch, it, rot) {
+            if !c.has || key < c.key || (key == c.key && (id, rot) < c.pos()) {
+                *c = Cache { has: true, key, fid: id, rot, node };
+            }
+        }
+    }
+
+    /// 정렬한 빈칸으로 `full` 을 찾는다. 비교 키가 지금 최선보다 커질 수밖에 없는 곳에서 멈춘다(같으면 번호로
+    /// 갈리므로 엄격히 클 때만). 비교는 (키, 번호, 회전) 전체 순서라 훑는 순서와 상관없이 같은 답이다.
+    fn full_indexed(&self, m: Method, it: &Item) -> Cache {
+        let mut c = Cache::NONE;
+        let (w, h, rw, rh) = self.dims(it);
+        let orients: &[(i32, i32, bool)] = if self.rotation { &[(w, h, false), (rw, rh, true)] } else { &[(w, h, false)] };
+        let over = |c: &Cache, v: i64| c.has && v > c.key.0;
+        match m {
+            Method::BestShortSideFit => {
+                // 짧은 여유 = min(폭 여유, 높이 여유): 어느 쪽이든 최선 이하인 빈칸만 볼 수 있다
+                for &(cw, ch, rot) in orients {
+                    let start = self.by_a.partition_point(|e| e.0.w < cw);
+                    for &(f, id) in &self.by_a[start..] {
+                        if over(&c, (f.w - cw) as i64) {
+                            break;
+                        }
+                        self.consider(m, (f, id), (cw, ch, rot), it, &mut c);
+                    }
+                    let start = self.by_b.partition_point(|e| e.0.h < ch);
+                    for &(f, id) in &self.by_b[start..] {
+                        if over(&c, (f.h - ch) as i64) {
+                            break;
+                        }
+                        self.consider(m, (f, id), (cw, ch, rot), it, &mut c);
+                    }
+                }
+            }
+            Method::BestLongSideFit => {
+                // 긴 여유 ≥ 폭 여유
+                for &(cw, ch, rot) in orients {
+                    let start = self.by_a.partition_point(|e| e.0.w < cw);
+                    for &(f, id) in &self.by_a[start..] {
+                        if over(&c, (f.w - cw) as i64) {
+                            break;
+                        }
+                        self.consider(m, (f, id), (cw, ch, rot), it, &mut c);
+                    }
+                }
+            }
+            Method::BestAreaFit => {
+                // 넓이 차는 빈칸 넓이에만 달려 있고 두 방향이 같다
+                let item = it.w as i64 * it.h as i64;
+                for &(f, id) in &self.by_a {
+                    let area = (f.w as i64 * f.h as i64 - item).clamp(i32::MIN as i64, i32::MAX as i64);
+                    if over(&c, area) {
+                        break;
+                    }
+                    for &(cw, ch, rot) in orients {
+                        self.consider(m, (f, id), (cw, ch, rot), it, &mut c);
+                    }
+                }
+            }
+            Method::BottomLeft => {
+                // 위쪽 끝 = y + 높이
+                let low = orients.iter().map(|o| o.1).min().unwrap_or(h);
+                for &(f, id) in &self.by_a {
+                    if over(&c, f.y as i64 + low as i64) {
+                        break;
+                    }
+                    for &(cw, ch, rot) in orients {
+                        self.consider(m, (f, id), (cw, ch, rot), it, &mut c);
+                    }
+                }
+            }
+            Method::ContactPoint => unreachable!("ContactPoint 는 색인하지 않는다"),
+        }
+        c
     }
 
     fn contact(&self, x: i32, y: i32, w: i32, h: i32) -> i32 {
@@ -635,6 +745,9 @@ impl Quick {
     }
 
     fn full(&self, m: Method, it: &Item) -> Cache {
+        if self.indexed == Some(m) {
+            return self.full_indexed(m, it);
+        }
         let mut c = Cache::NONE;
         for i in 0..self.free.len() {
             self.offer(m, i, it, &mut c);
@@ -666,6 +779,7 @@ impl Quick {
         self.right.entry(u.x + u.w).or_default().push(u);
         self.bottom.entry(u.y).or_default().push(u);
         self.top.entry(u.y + u.h).or_default().push(u);
+        self.reindex();
         start
     }
 
@@ -760,6 +874,7 @@ impl Quick {
 
     /// Fast: 정한 순서대로 넣고, 못 넣으면 그 뒤는 모두 남긴다.
     fn insert_all(&mut self, items: &[Item], m: Method, fully: bool) -> Trial {
+        self.index_for(m);
         let mut out = Vec::new();
         let mut rest_area: i64 = if fully { items.iter().map(|it| self.min_area(it)).sum() } else { 0 };
         for (k, it) in items.iter().enumerate() {
@@ -783,6 +898,7 @@ impl Quick {
 
     /// 매번 가장 잘 맞는 영역을 골라 넣는다.
     fn pack_best(&mut self, items: &[Item], m: Method, fully: bool) -> Trial {
+        self.index_for(m);
         let mut rest: Vec<Item> = items.to_vec();
         let mut caches: Vec<Cache> = rest.iter().map(|it| self.full(m, it)).collect();
         let mut out = Vec::new();
@@ -791,6 +907,7 @@ impl Quick {
         let mut by_y: Map<Vec<usize>> = Map::default();
         let mut gone: Vec<bool> = Vec::new();
         let mut cands: Vec<usize> = Vec::new();
+        let mut sizes: Vec<(i32, i32)> = Vec::new();
         while !rest.is_empty() {
             if fully && self.hopeless(rest_area) {
                 return Trial { out, remaining: rest, w: 0, h: 0 };
@@ -842,12 +959,24 @@ impl Quick {
             let q = &*self;
             let gone = &gone;
             let (by_x, by_y) = (&by_x, &by_y);
+            // 기억한 빈칸이 사라진 영역은 처음부터 다시 찾는다. 결과는 영역 크기로만 정해지므로 크기마다 한 번만 찾는다
+            sizes.clear();
+            sizes.extend(caches.iter().zip(&rest).filter(|(c, _)| c.has && gone[c.fid as usize]).map(|(_, it)| (it.w, it.h)));
+            sizes.sort_unstable();
+            sizes.dedup();
+            let found: Vec<Cache> = if sizes.len() >= PARALLEL_FULL {
+                sizes.par_iter().map(|&(w, h)| q.full(m, &Item { idx: 0, w, h })).collect()
+            } else {
+                sizes.iter().map(|&(w, h)| q.full(m, &Item { idx: 0, w, h })).collect()
+            };
+            let sizes = &sizes;
+            let found = &found;
             let update = |cands: &mut Vec<usize>, (c, it): (&mut Cache, &Item)| {
                 if !c.has {
                     return; // 새 빈칸은 옛 빈칸 안에 있으므로 들어갈 곳이 생기지 않는다
                 }
                 if gone[c.fid as usize] {
-                    *c = q.full(m, it);
+                    *c = found[sizes.binary_search(&(it.w, it.h)).expect("위에서 모은 크기")];
                     return;
                 }
                 if m == Method::ContactPoint {
@@ -888,6 +1017,8 @@ impl Quick {
 
 /// 남은 영역이 이만큼 이상이면 기억한 자리 고치기를 나눠 돌린다(적으면 나누는 비용이 더 크다).
 const PARALLEL_UPDATE: usize = 256;
+/// 다시 찾을 크기가 이만큼 이상이면 나눠 찾는다.
+const PARALLEL_FULL: usize = 64;
 
 fn common(a0: i32, a1: i32, b0: i32, b1: i32) -> i32 {
     if a1 < b0 || b1 < a0 {
