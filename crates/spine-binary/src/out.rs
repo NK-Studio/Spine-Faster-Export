@@ -49,12 +49,12 @@ impl Out {
         self.b.extend_from_slice(&(v as i16).to_be_bytes());
     }
 
-    /// 길이(글자 수 + 1, null 이면 0) 뒤에 UTF-8 바이트.
+    /// 길이(UTF-8 바이트 수 + 1, null 이면 0) 뒤에 UTF-8 바이트. 런타임 `readString` 이 바이트 수로 읽는다.
     pub fn string(&mut self, s: Option<&str>) {
         match s {
             None => self.varint(0),
             Some(s) => {
-                self.varint(s.chars().count() as i64 + 1);
+                self.varint(s.len() as i64 + 1);
                 self.b.extend_from_slice(s.as_bytes());
             }
         }
@@ -95,7 +95,7 @@ mod tests {
         o.string(None);
         o.string(Some(""));
         o.string(Some("가a"));
-        assert_eq!(o.b, vec![0, 1, 3, 0xEA, 0xB0, 0x80, b'a']);
+        assert_eq!(o.b, vec![0, 1, 5, 0xEA, 0xB0, 0x80, b'a']);
         let mut o = Out::default();
         o.float(1.0);
         o.int(0xFFFF_FFFF);
