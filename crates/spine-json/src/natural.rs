@@ -26,17 +26,17 @@ fn digit_value(c: u16) -> Option<u16> {
     ND_ZEROS.iter().find(|&&z| c >= z && c < z + 10).map(|&z| c - z)
 }
 
-/// `char.ToLowerInvariant`(단순 대소문자 대응, 한 코드 단위).
-fn to_lower(c: u16) -> u16 {
+/// 단순 대문자 대응(한 코드 단위).
+fn to_upper(c: u16) -> u16 {
     if c < 0x80 {
-        return (c as u8).to_ascii_lowercase() as u16;
+        return (c as u8).to_ascii_uppercase() as u16;
     }
     match char::from_u32(c as u32) {
         Some(ch) => {
-            let mut lower = ch.to_lowercase();
-            match lower.next() {
-                // 단순 대응: 전체 대응의 첫 글자(İ → i). BMP 밖으로 가는 경우는 그대로 둔다.
-                Some(l) if (l as u32) <= 0xFFFF => l as u16,
+            let mut upper = ch.to_uppercase();
+            match upper.next() {
+                // 단순 대응: 전체 대응의 첫 글자(ß → S). BMP 밖으로 가는 경우는 그대로 둔다.
+                Some(u) if (u as u32) <= 0xFFFF => u as u16,
                 _ => c,
             }
         }
@@ -44,12 +44,15 @@ fn to_lower(c: u16) -> u16 {
     }
 }
 
-/// 편집기의 이름 정렬: 글자 단위로 비교하되 양쪽이 숫자면 수로 비교(flare2 < flare10, muzzle-glow < muzzle01).
+/// 편집기의 이름 정렬: 글자를 대문자로 바꿔 비교하되 양쪽이 숫자면 수로 비교(flare2 < flare10, muzzle-glow < muzzle01).
+/// 대문자로 비교하므로 글자가 `_` 보다 앞이다(swingBoard_back < swing_back). 대소문자만 다른 글자는
+/// 끝까지 같을 때만 순서를 정한다(line_front < Line_root). Spine 4.2.43 편집기 출력으로 확인.
 pub(crate) fn natural_cmp(a: &str, b: &str) -> Ordering {
     let a: Vec<u16> = a.encode_utf16().collect();
     let b: Vec<u16> = b.encode_utf16().collect();
     let mut i = 0;
     let mut j = 0;
+    let mut case = Ordering::Equal;
     while i < a.len() && j < b.len() {
         if digit_value(a[i]).is_some() && digit_value(b[j]).is_some() {
             let mut i2 = i;
@@ -70,17 +73,19 @@ pub(crate) fn natural_cmp(a: &str, b: &str) -> Ordering {
         }
 
         if a[i] != b[j] {
-            let ca = to_lower(a[i]);
-            let cb = to_lower(b[j]);
+            let ca = to_upper(a[i]);
+            let cb = to_upper(b[j]);
             if ca != cb {
                 return ca.cmp(&cb);
             }
-            return a[i].cmp(&b[j]);
+            if case == Ordering::Equal {
+                case = a[i].cmp(&b[j]);
+            }
         }
         i += 1;
         j += 1;
     }
-    ((a.len() - i) as i64 - (b.len() - j) as i64).cmp(&0)
+    ((a.len() - i) as i64 - (b.len() - j) as i64).cmp(&0).then(case)
 }
 
 /// 숫자 구간을 값으로 비교한다(길이에 제한이 없게 자릿수로).
@@ -117,8 +122,12 @@ mod tests {
         assert_eq!(v, vec!["A", "a", "B", "flare2", "flare02", "flare10", "muzzle-glow", "muzzle01", "x"]);
         assert_eq!(natural_cmp("flare2", "flare02"), Ordering::Equal);
         assert_eq!(natural_cmp("ab", "abc"), Ordering::Less);
-        assert_eq!(natural_cmp("a_", "aZ"), Ordering::Less); // '_'(0x5F) < 'z'(0x7A)
+        assert_eq!(natural_cmp("aZ", "a_"), Ordering::Less); // 대문자로 비교: 'Z'(0x5A) < '_'(0x5F)
+        assert_eq!(natural_cmp("swingBoard_back", "swing_back"), Ordering::Less);
+        assert_eq!(natural_cmp("DyeingWorkShop", "dye_01"), Ordering::Less);
         assert_eq!(natural_cmp("a١٢", "a3"), Ordering::Greater); // 아라비아 숫자 12 > 3
+        assert_eq!(natural_cmp("line_front", "Line_root"), Ordering::Less); // 대소문자는 끝까지 같을 때만
+        assert_eq!(natural_cmp("Line_root", "line_root"), Ordering::Less);
     }
 
     #[test]

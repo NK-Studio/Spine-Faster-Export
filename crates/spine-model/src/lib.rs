@@ -7,6 +7,7 @@
 //! C# 의 참조형(string, List) 중 null 이 될 수 있는 것은 `Option` 으로 옮겼다.
 //! C# 에서 `= new List<..>()` 로 항상 채워지는 목록은 `Vec` 이다.
 
+use std::cmp::Ordering;
 use std::fmt;
 
 /// 내보내기 파이프라인 공통 오류. 메시지는 사용자에게 그대로 보이는 한국어 문장이다.
@@ -405,4 +406,134 @@ pub struct AtlasPage {
 pub struct AtlasOutput {
     pub atlas_text: String,
     pub pages: Vec<AtlasPage>,
+}
+
+/// 편집기의 이름 정렬: 글자를 대문자로 바꿔 비교하되 양쪽이 숫자면 수로 비교.
+/// 대문자로 비교하므로 글자가 `_` 보다 앞이다(swingBoard_back < swing_back). 대소문자만 다른 글자는
+/// 끝까지 같을 때만 순서를 정한다(line_front < Line_root). Spine 4.2.43 편집기 출력으로 확인.
+pub fn nat_cmp(a: &str, b: &str) -> Ordering {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (mut i, mut j) = (0usize, 0usize);
+    let mut case = Ordering::Equal;
+    while i < a.len() && j < b.len() {
+        if a[i].is_ascii_digit() && b[j].is_ascii_digit() {
+            let (mut i2, mut j2) = (i, j);
+            while i2 < a.len() && a[i2].is_ascii_digit() {
+                i2 += 1;
+            }
+            while j2 < b.len() && b[j2].is_ascii_digit() {
+                j2 += 1;
+            }
+            let o = cmp_digits(&a[i..i2], &b[j..j2]);
+            if o != Ordering::Equal {
+                return o;
+            }
+            i = i2;
+            j = j2;
+            continue;
+        }
+        if a[i] != b[j] {
+            let ca: String = a[i].to_uppercase().collect();
+            let cb: String = b[j].to_uppercase().collect();
+            if ca != cb {
+                return ca.cmp(&cb);
+            }
+            if case == Ordering::Equal {
+                case = a[i].cmp(&b[j]);
+            }
+        }
+        i += 1;
+        j += 1;
+    }
+    let ra = (a.len() - i) as i64;
+    let rb = (b.len() - j) as i64;
+    (ra - rb).cmp(&0).then(case)
+}
+
+/// 숫자 문자열을 정수로 비교(자릿수 제한 없음).
+fn cmp_digits(x: &[char], y: &[char]) -> Ordering {
+    let strip = |s: &[char]| -> Vec<char> {
+        let k = s.iter().position(|c| *c != '0').unwrap_or(s.len());
+        s[k..].to_vec()
+    };
+    let (x, y) = (strip(x), strip(y));
+    x.len().cmp(&y.len()).then_with(|| x.cmp(&y))
+}
+
+/// 편집기 트리 순서로 전체 이름(`폴더/…/이름`)을 비교한다. 폴더 밖 항목이 먼저, 그다음 폴더 이름순(이름은 [`nat_cmp`]).
+/// 같은 폴더 안에서는 하위 폴더의 항목이 그 폴더의 직접 항목보다 먼저다(`folder/sub/deep` < `folder/a`).
+/// Spine 4.2.43 의 애니메이션(chibi-stickers, 폴더를 섞은 실험 프로젝트)과 물리 제약(celestial-circus) 순서로 확인했다.
+pub fn folder_cmp(a: &str, b: &str) -> Ordering {
+    let (fa, na) = a.rsplit_once('/').unwrap_or(("", a));
+    let (fb, nb) = b.rsplit_once('/').unwrap_or(("", b));
+    match (fa.is_empty(), fb.is_empty()) {
+        (true, true) => return nat_cmp(na, nb),
+        (true, false) => return Ordering::Less,
+        (false, true) => return Ordering::Greater,
+        (false, false) => {}
+    }
+    let (mut sa, mut sb) = (fa.split('/'), fb.split('/'));
+    loop {
+        match (sa.next(), sb.next()) {
+            (Some(x), Some(y)) => {
+                let o = nat_cmp(x, y);
+                if o != Ordering::Equal {
+                    return o;
+                }
+            }
+            (Some(_), None) => return Ordering::Less,
+            (None, Some(_)) => return Ordering::Greater,
+            (None, None) => return nat_cmp(na, nb),
+        }
+    }
+}
+
+/// 4.3 편집기는 scale 키의 0 을 0.00001 로 쓴다(Spine 4.3.26 coin-pro · spineboy-pro portal). 그렇게 바꾼 복사본.
+pub fn scale_keys_43(t: &ModelTimeline) -> ModelTimeline {
+    let mut out = t.clone();
+    for k in &mut out.keys {
+        if let Some(v) = &mut k.values {
+            for x in v.iter_mut().filter(|x| **x == 0.0) {
+                *x = 0.00001;
+            }
+        }
+    }
+    out
+}
+
+/// 4.0 편집기의 스킨 순서: default 다음, 폴더를 뗀 마지막 이름순(Spine 4.0.64 mix-and-match: backpack, bag, blue, …).
+/// 4.1 부터는 폴더 순서다(같은 4.0.07 프로젝트를 4.1.24 편집기로 내보내 확인).
+pub fn sort_skins_40(skins: &mut [&ModelSkin]) {
+    let short = |s: &ModelSkin| s.name.as_deref().map(|n| n.rsplit('/').next().unwrap_or(n).to_string());
+    skins.sort_by(|a, b| {
+        let (da, db) = (a.name.as_deref() == Some("default"), b.name.as_deref() == Some("default"));
+        db.cmp(&da).then_with(|| nat_cmp(&short(a).unwrap_or_default(), &short(b).unwrap_or_default()))
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn folder_order() {
+        // Spine 4.2.43 이 쓴 순서(폴더를 섞은 애니메이션 실험 프로젝트)
+        let want = [
+            "aB", "alpha", "a_b", "idle", "m", "walk", "z9", "z10", "Beta/x", "beta/y", "folder/sub/deep", "folder/a", "m/idle", "m/Idle2",
+            "m_x/q", "zeta/run",
+        ];
+        let mut v = want.to_vec();
+        v.reverse();
+        v.sort_by(|a, b| folder_cmp(a, b));
+        assert_eq!(v, want);
+    }
+
+    #[test]
+    fn natural_order() {
+        assert_eq!(nat_cmp("swingBoard_back", "swing_back"), Ordering::Less);
+        assert_eq!(nat_cmp("line_front", "Line_root"), Ordering::Less);
+        assert_eq!(nat_cmp("Line_root", "line_root"), Ordering::Less);
+        assert_eq!(nat_cmp("z9", "z10"), Ordering::Less);
+    }
 }

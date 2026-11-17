@@ -232,6 +232,21 @@ pub fn fmt_round(x: f64, digits: i32) -> String {
     java_double(round_half_up(x, digits))
 }
 
+/// 4.2 이하 편집기 JSON: 자릿수로 반올림한 값을 float 에 담아, 그 float 로 되돌아오는 가장 짧은 십진수로 쓴다.
+/// 큰 값은 float 정밀도 때문에 자릿수가 줄어든다(변형 값 -180.95551 → "-180.9555", Spine 4.2.43 alien-pro).
+/// 4.3 의 [`fmt_f32`] 와는 다르다(owl-pro 129.83382 는 그대로 129.83382).
+pub fn fmt_round_f32(x: f64, digits: i32) -> String {
+    let r = round_half_up(x, digits);
+    let f = r as f32;
+    if f == f.trunc() && f.abs() < 1e7 {
+        return int(f64::from(f));
+    }
+    if !(1e-3..1e7).contains(&f.abs()) {
+        return java_double(r);
+    }
+    format!("{f}")
+}
+
 fn int(x: f64) -> String {
     (x as i64).to_string()
 }
@@ -552,6 +567,15 @@ pub fn fmt_f32(value: f64, int_ok: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn round_f32_shortest() {
+        // Spine 4.2.43 alien-pro · owl-pro 의 변형 값
+        assert_eq!(super::fmt_round_f32(-180.95550537109375, 5), "-180.9555");
+        assert_eq!(super::fmt_round_f32(129.83381652832031, 5), "129.83382");
+        assert_eq!(super::fmt_round_f32(-92.23505, 5), "-92.23505");
+        assert_eq!(super::fmt_round_f32(3.0, 2), "3");
+    }
+
     use super::*;
 
     #[test]

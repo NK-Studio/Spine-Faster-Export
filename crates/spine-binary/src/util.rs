@@ -1,7 +1,5 @@
 //! 파이썬 `json_writer.py` 에서 가져온 작은 도우미들(spine-json 에 기대지 않도록 여기에 옮겼다).
 
-use std::cmp::Ordering;
-
 use spine_model::{ModelConstraint, ModelFromProperty, ModelKey, ModelToProperty};
 
 /// 곡선 손잡이가 정해지지 않았다는 표시(0x4f000000).
@@ -13,53 +11,7 @@ pub fn f32r(x: f64) -> f64 {
     x as f32 as f64
 }
 
-/// 편집기의 이름 정렬(파이썬 `_nat_cmp`): 글자 단위로 비교하되 양쪽이 숫자면 수로 비교.
-pub fn nat_cmp(a: &str, b: &str) -> Ordering {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < a.len() && j < b.len() {
-        if a[i].is_ascii_digit() && b[j].is_ascii_digit() {
-            let (mut i2, mut j2) = (i, j);
-            while i2 < a.len() && a[i2].is_ascii_digit() {
-                i2 += 1;
-            }
-            while j2 < b.len() && b[j2].is_ascii_digit() {
-                j2 += 1;
-            }
-            let o = cmp_digits(&a[i..i2], &b[j..j2]);
-            if o != Ordering::Equal {
-                return o;
-            }
-            i = i2;
-            j = j2;
-            continue;
-        }
-        if a[i] != b[j] {
-            let ca: String = a[i].to_lowercase().collect();
-            let cb: String = b[j].to_lowercase().collect();
-            if ca != cb {
-                return ca.cmp(&cb);
-            }
-            return a[i].cmp(&b[j]);
-        }
-        i += 1;
-        j += 1;
-    }
-    let ra = (a.len() - i) as i64;
-    let rb = (b.len() - j) as i64;
-    (ra - rb).cmp(&0)
-}
-
-/// 숫자 문자열을 정수로 비교(자릿수 제한 없음).
-fn cmp_digits(x: &[char], y: &[char]) -> Ordering {
-    let strip = |s: &[char]| -> Vec<char> {
-        let k = s.iter().position(|c| *c != '0').unwrap_or(s.len());
-        s[k..].to_vec()
-    };
-    let (x, y) = (strip(x), strip(y));
-    x.len().cmp(&y.len()).then_with(|| x.cmp(&y))
-}
+pub use spine_model::nat_cmp;
 
 /// float32 표현 사이의 간격 수(파이썬 `_ulps`).
 pub fn ulps(a: f64, b: f64) -> i64 {
@@ -118,7 +70,7 @@ pub fn same_key_stepped(k: &ModelKey, nxt: &ModelKey, nch: usize) -> bool {
         if !a[..n]
             .iter()
             .zip(&b[..n])
-            .all(|(x, y)| (x - y).abs() <= 1e-6 || ulps(*x, *y) <= 1)
+            .all(|(x, y)| (x - y).abs() <= 1e-5 || ulps(*x, *y) <= 1)
         {
             return false;
         }
@@ -167,6 +119,7 @@ pub fn legacy_properties(c: &ModelConstraint) -> Vec<ModelFromProperty> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cmp::Ordering;
 
     #[test]
     fn natural_order() {

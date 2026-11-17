@@ -80,6 +80,43 @@ fn curve_channels(ty: i64) -> i32 {
     }
 }
 
+/// path 점 [들어오는 손잡이, 점, 나가는 손잡이]×꼭짓점 → 곡선마다 누적 길이(마지막 곡선은 처음 점으로 돌아간다).
+/// 런타임 `PathConstraint.computeWorldPositions` 의 4구간 forward differencing(Java float)과 같은 순서로 계산한다.
+fn curve_lengths(p: &[(f32, f32)]) -> Vec<f64> {
+    let n = p.len();
+    let mut out = Vec::with_capacity(n / 3);
+    let mut length = 0f32;
+    for c in 0..n / 3 {
+        let (x1, y1) = p[3 * c + 1];
+        let (cx1, cy1) = p[3 * c + 2];
+        let (cx2, cy2) = p[(3 * c + 3) % n];
+        let (x2, y2) = p[(3 * c + 4) % n];
+        let tmpx = (x1 - cx1 * 2.0 + cx2) * 0.1875;
+        let tmpy = (y1 - cy1 * 2.0 + cy2) * 0.1875;
+        let dddfx = ((cx1 - cx2) * 3.0 - x1 + x2) * 0.09375;
+        let dddfy = ((cy1 - cy2) * 3.0 - y1 + y2) * 0.09375;
+        let mut ddfx = tmpx * 2.0 + dddfx;
+        let mut ddfy = tmpy * 2.0 + dddfy;
+        let mut dfx = (cx1 - x1) * 0.75 + tmpx + dddfx * 0.166_666_67;
+        let mut dfy = (cy1 - y1) * 0.75 + tmpy + dddfy * 0.166_666_67;
+        let step = |dfx: f32, dfy: f32| f64::from(dfx * dfx + dfy * dfy).sqrt() as f32;
+        length += step(dfx, dfy);
+        dfx += ddfx;
+        dfy += ddfy;
+        ddfx += dddfx;
+        ddfy += dddfy;
+        length += step(dfx, dfy);
+        dfx += ddfx;
+        dfy += ddfy;
+        length += step(dfx, dfy);
+        dfx += ddfx + dddfx;
+        dfy += ddfy + dddfy;
+        length += step(dfx, dfy);
+        out.push(f64::from(length));
+    }
+    out
+}
+
 fn inherits(k: i64) -> Option<&'static str> {
     Some(match k {
         1 => "normal",
@@ -428,6 +465,8 @@ impl<'a> Reader<'a> {
                 anims.push(self.animation(a)?);
             }
         }
+        // 편집기 트리 순서(폴더 밖이 먼저, 하위 폴더가 직접 항목보다 먼저)
+        anims.sort_by(|a, b| folder_cmp(a.name.as_deref().unwrap_or(""), b.name.as_deref().unwrap_or("")));
         m.animations = anims;
         m.strings = self.string_table(sk)?;
         Ok(m)
@@ -828,7 +867,8 @@ impl<'a> Reader<'a> {
             let attachment = self.attachment(an)?;
             rows.push(Row { slot_index, key, attachment });
         }
-        rows.sort_by(|a, b| a.slot_index.cmp(&b.slot_index).then_with(|| cmp_ordinal(a.key.as_deref(), b.key.as_deref())));
+        // 슬롯 안은 프로젝트에 저장된 순서 그대로 둔다(편집기 바이너리가 이 순서로 쓴다. JSON 은 writer 가 이름순으로 다시 정렬)
+        rows.sort_by_key(|r| r.slot_index);
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             let slot = *self.slots.get(r.slot_index).ok_or_else(|| broken("인덱스가 범위를 벗어났습니다"))?;
@@ -891,6 +931,42 @@ impl<'a> Reader<'a> {
         o.dense_map = Some(dense_map);
         o.setup = Some(setup);
         Ok(())
+    }
+
+    /// path 의 곡선 길이(누적)를 셋업 포즈 월드 좌표에서 다시 계산한다. 편집기는 내보낼 때 저장된 캐시(필드 15)
+    /// 대신 이 값을 쓴다(JSON 을 가져온 프로젝트는 캐시가 반올림된 JSON 값이라 다르다). 계산은 런타임
+    /// `PathConstraint` 의 곡선당 4구간 forward differencing 을 Java float 로 한 것과 같다.
+    /// Spine 4.2.43 출력과 비트까지 맞춰 본 경우(뼈 사슬에 회전·기울임이 없고 배율이 ±1, 상속 normal)만 계산하고,
+    /// 그 밖에는 None(캐시를 쓴다).
+    fn path_lengths(&self, a: NodeId, vertices: &[f64]) -> R<Option<Vec<f64>>> {
+        let mut chain = Vec::new();
+        let mut b = self.node_of(self.att_slot(Some(a)), 2, self.c.bone);
+        while let Some(n) = b {
+            if chain.len() > 10_000 {
+                return Ok(None); // 순환
+            }
+            chain.push(n);
+            b = self.node_of(Some(n), 3, self.c.bone);
+        }
+        if chain.is_empty() || !vertices.len().is_multiple_of(6) {
+            return Ok(None);
+        }
+        // 뼈 월드 변환: a = sx, d = sy, b = c = 0 이라 월드 = (sx·x + wx, sy·y + wy)
+        let (mut wx, mut wy, mut sx, mut sy) = (0f32, 0f32, 1f32, 1f32);
+        for &n in chain.iter().rev() {
+            let n = Some(n);
+            let (bsx, bsy) = (self.f(n, 13, 1.0) as f32, self.f(n, 14, 1.0) as f32);
+            let plain = self.f(n, 12, 0.0) == 0.0 && self.f(n, 23, 0.0) == 0.0 && self.f(n, 25, 0.0) == 0.0;
+            if !plain || bsx.abs() != 1.0 || bsy.abs() != 1.0 || self.leaf_long(n, 27, 1)? != 1 {
+                return Ok(None);
+            }
+            wx += sx * self.f(n, 10, 0.0) as f32;
+            wy += sy * self.f(n, 11, 0.0) as f32;
+            sx *= bsx;
+            sy *= bsy;
+        }
+        let world: Vec<(f32, f32)> = vertices.chunks_exact(2).map(|v| (sx * v[0] as f32 + wx, sy * v[1] as f32 + wy)).collect();
+        Ok(Some(curve_lengths(&world)))
     }
 
     /// 가중치 메시의 삼각형을 Spine 이 내보내는 순서로 만든다.
@@ -958,7 +1034,11 @@ impl<'a> Reader<'a> {
                 o.r#type = Some("path".into());
                 o.closed = self.i(a, 12, 0) != 0;
                 o.constant_speed = self.i(a, 13, 1) != 0;
-                o.lengths = Some(self.leaf_floats(a, 15)?.unwrap_or_default());
+                let cached = self.leaf_floats(a, 15)?.unwrap_or_default();
+                o.lengths = Some(match o.vertices.as_deref() {
+                    Some(v) if !o.weighted => self.path_lengths(an, v)?.unwrap_or(cached),
+                    _ => cached,
+                });
             } else if cls == "ClippingAtt" {
                 o.r#type = Some("clipping".into());
                 o.end = self.name(self.p.get_node(a, 12, self.c.slot));
@@ -1534,7 +1614,15 @@ fn hull_count(tri: &[i64]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::sort_triangles_once;
+    use super::{curve_lengths, sort_triangles_once};
+
+    #[test]
+    fn path_curve_lengths() {
+        // Spine 4.2.43 이 JSON 에서 가져온 프로젝트를 내보낸 값(뼈 y = 38.72, 정점은 셋업 포즈 월드 좌표)
+        let v = [-19.42f32, -125.91, 0.04, 0.01, 16.83, 108.66, 113.29, 71.45, 97.76, -21.74, 88.48, -77.4];
+        let p: Vec<(f32, f32)> = v.chunks_exact(2).map(|c| (c[0], c[1] + 38.72)).collect();
+        assert_eq!(curve_lengths(&p), vec![f64::from(198.3739f32), f64::from(384.5733f32)]);
+    }
 
     #[test]
     fn weighted_triangles_follow_the_weights_list() {

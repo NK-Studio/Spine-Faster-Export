@@ -18,7 +18,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use spine_model::{
-    ModelAnimation, ModelAttachment, ModelBone, ModelConstraint, ModelEvent, ModelFromProperty, ModelKey, ModelSkin, ModelSkinEntry, ModelSlot, ModelTimeline,
+    folder_cmp, scale_keys_43, sort_skins_40, ModelAnimation, ModelAttachment, ModelBone, ModelConstraint, ModelEvent, ModelFromProperty, ModelKey, ModelSkin, ModelSkinEntry, ModelSlot, ModelTimeline,
     ModelToProperty, SkeletonModel, SpineError, SpineResult,
 };
 
@@ -26,7 +26,7 @@ use json::{dumps_styled, write_map_entries, JsonMap, J};
 
 pub use json::JsonFormat;
 use natural::{natural_cmp, ordinal_cmp};
-use numbers::{f32r, fmt_f32, fmt_round, round_half_up};
+use numbers::{f32r, fmt_f32, fmt_round_f32, round_half_up};
 
 /// 숫자 표기 함수(다른 출력기·테스트에서 쓸 수 있게 공개).
 pub mod number {
@@ -171,7 +171,8 @@ fn same_key_stepped(k: &ModelKey, next: &ModelKey, channels: usize) -> bool {
     } else {
         let count = if ik { a.len().min(2) } else { a.len() };
         for i in 0..count {
-            if !((a[i] - b[i]).abs() <= 1e-6 || ulps(a[i], b[i]) <= 1) {
+            // 1e-5 까지 같은 값(Spine 4.2.43 hero-ess walk shin2: 7.5582314 와 7.5582328 은 계단)
+            if !((a[i] - b[i]).abs() <= 1e-5 || ulps(a[i], b[i]) <= 1) {
                 return false;
             }
         }
@@ -296,7 +297,8 @@ fn path_and_color(o: &mut JsonMap, a: &ModelAttachment) {
 /// 슬롯·첨부 키 모두 자연 정렬. 이름이 다르지만 자연 정렬로 같으면 뒤의 키를 보지 않는다(파이썬 튜플 비교와 같음).
 fn row_order(a: &ModelSkinEntry, b: &ModelSkinEntry) -> Ordering {
     if a.slot != b.slot {
-        return natural_cmp(key(&a.slot), key(&b.slot));
+        // 슬롯은 편집기 트리 순서(Spine 4.2.43 celestial-circus: 폴더 밖 슬롯 뒤에 face/fringe-front/…, face/…)
+        return folder_cmp(key(&a.slot), key(&b.slot));
     }
     if a.key == b.key {
         Ordering::Equal
@@ -402,12 +404,12 @@ impl<'a> Writer<'a> {
     // ------------------------------------------------------------ 숫자
 
     fn n(&self, x: f64, kind: Kind) -> J {
-        J::Num(if self.f43 { fmt_f32(x, true) } else { fmt_round(x, kind.digits()) })
+        J::Num(if self.f43 { fmt_f32(x, true) } else { fmt_round_f32(x, kind.digits()) })
     }
 
     /// 4.3 에서 정수도 '.0' 을 붙이는 자리(정점·메시 크기 등).
     fn nf(&self, x: f64, kind: Kind) -> J {
-        J::Num(if self.f43 { fmt_f32(x, false) } else { fmt_round(x, kind.digits()) })
+        J::Num(if self.f43 { fmt_f32(x, false) } else { fmt_round_f32(x, kind.digits()) })
     }
 
     /// 프레임 → 초. 4.0~4.2 편집기는 float32 로 1/fps 를 곱하고, 4.3 은 fps 로 나눈다.
@@ -435,7 +437,7 @@ impl<'a> Writer<'a> {
         if self.f43 {
             return J::Num(fmt_f32(round_half_up(x, kind.digits()), false));
         }
-        J::Num(fmt_round(x, kind.digits()))
+        J::Num(fmt_round_f32(x, kind.digits()))
     }
 
     /// 기본값이 아니면 쓴다.
@@ -480,7 +482,8 @@ impl<'a> Writer<'a> {
             let iks = sorted_of_type(cons, "ik");
             let trs = sorted_of_type(cons, "transform");
             let paths = sorted_of_type(cons, "path");
-            let phys = sorted_of_type(cons, "physics");
+            let mut phys: Vec<&ModelConstraint> = cons.iter().filter(|c| eq(&c.r#type, "physics")).collect();
+            phys.sort_by(|a, b| folder_cmp(key(&a.name), key(&b.name)));
             if cons.iter().any(|c| eq(&c.r#type, "slider")) {
                 return Err(SpineError::Usage("슬라이더 제약은 Spine 4.3 전용이라 이 버전으로 내보낼 수 없습니다".to_string()));
             }
@@ -501,7 +504,11 @@ impl<'a> Writer<'a> {
         }
 
         let mut skins = Vec::with_capacity(m.skins.len());
-        for s in &m.skins {
+        let mut order: Vec<&ModelSkin> = m.skins.iter().collect();
+        if self.major == 4 && self.minor == 0 {
+            sort_skins_40(&mut order);
+        }
+        for s in order {
             if self.v38 && eq(&s.name, "default") && s.attachments.is_empty() && s.bones.is_empty() && s.constraints.is_empty() {
                 continue; // 3.8 편집기는 빈 기본 스킨을 쓰지 않는다
             }
@@ -593,9 +600,10 @@ impl<'a> Writer<'a> {
             if !is_null_or_empty(&b.color) && !eq(&b.color, "989898ff") && !eq(&b.color, "9b9b9bff") {
                 o.set("color", J::opt(&b.color));
             }
-            // 3.8 런타임은 icon 을 읽지 않는다. Spine 의 3.8 내보내기는 4.2·4.3 프로젝트일 때만 icon 을 남긴다
-            // (3.8·4.1 프로젝트는 쓰지 않는다. 공식 CLI 와 Spine 3.8 편집기 출력과 비교해 확인)
-            if !is_null_or_empty(&b.icon) && !eq(&b.icon, "bone") && (self.at_least(4, 1) || (self.v38 && self.source_at_least(4, 2))) {
+            // icon 은 4.2 이상 편집기만 쓴다: 3.8 내보내기는 4.2·4.3 프로젝트일 때만 icon 을 남기고(공식 CLI 와
+            // Spine 3.8 편집기 출력과 비교), Spine 4.1.24 편집기는 4.1 프로젝트를 내보낼 때 icon 을 쓰지 않는다.
+            let editor42 = self.at_least(4, 2) || self.source_at_least(4, 2);
+            if !is_null_or_empty(&b.icon) && !eq(&b.icon, "bone") && editor42 && (self.at_least(4, 1) || self.v38) {
                 o.set("icon", J::opt(&b.icon));
             }
         }
@@ -1011,11 +1019,12 @@ impl<'a> Writer<'a> {
     fn attachment(&self, a: &ModelAttachment) -> SpineResult<JsonMap> {
         let mut o = JsonMap::new();
         let t = a.r#type.as_deref();
-        if t != Some("region") {
-            o.set("type", J::opt(&a.r#type));
-        }
+        // 편집기는 name 을 type 보다 먼저 쓴다(Spine 4.2.43: chibi-stickers · goblins-pro · mix-and-match-pro)
         if a.name != a.key {
             o.set("name", J::opt(&a.name));
+        }
+        if t != Some("region") {
+            o.set("type", J::opt(&a.r#type));
         }
 
         match t {
@@ -1188,7 +1197,7 @@ impl<'a> Writer<'a> {
                     }
                 }
                 "rotate" | "translate" | "scale" | "shear" => {
-                    let keys = self.bone_keys(t);
+                    let keys = if self.f43 && t.type_str() == "scale" { self.bone_keys(&scale_keys_43(t)) } else { self.bone_keys(t) };
                     sec.get_or_add_map("bones").get_or_add_map(key(&t.bone)).set(t.type_str(), J::List(keys));
                 }
                 "ik" => {
@@ -1231,11 +1240,12 @@ impl<'a> Writer<'a> {
                         .set("sequence", J::List(keys));
                 }
                 "physicsWind" => {
-                    let keys = self.value_keys(t, 0.0, Pos);
+                    // 바람 값과 곡선은 소수 넷째 자리(Spine 4.2.43 celestial-circus wind-idle: -6.3803)
+                    let keys = self.value_keys(t, 0.0, Scale);
                     sec.get_or_add_map("physics").get_or_add_map(key(&t.constraint)).set("wind", J::List(keys));
                 }
                 "physicsWindAll" => {
-                    let keys = self.value_keys(t, 0.0, Pos);
+                    let keys = self.value_keys(t, 0.0, Scale);
                     sec.get_or_add_map("physics").get_or_add_map("").set("wind", J::List(keys));
                 }
                 "sliderMix" => {
@@ -1272,10 +1282,20 @@ impl<'a> Writer<'a> {
                 sort_child(&mut sec, k, 0);
             }
         }
+        if sec.contains("physics") {
+            // 모든 물리 제약 대상(빈 이름)은 맨 뒤(Spine 4.2.43 celestial-circus wind-idle)
+            let physics = std::mem::take(sec.get_or_add_map("physics"));
+            let (all, named): (Vec<_>, Vec<_>) = physics.into_entries().into_iter().partition(|(k, _)| k.is_empty());
+            let mut out = JsonMap::new();
+            for (k, v) in named.into_iter().chain(all) {
+                out.set(&k, v);
+            }
+            sec.set("physics", J::Map(out));
+        }
         for name in ["attachments", "deform"] {
             if sec.contains(name) {
-                // 스킨 → 슬롯 → 첨부 세 단계 모두 이름순
-                sort_child(&mut sec, name, 2);
+                // 스킨 → 슬롯은 이름순, 슬롯 안 첨부는 타임라인 순서(Spine 4.2.43 alien-pro: head 가 burst01 앞)
+                sort_child(&mut sec, name, 1);
             }
         }
 

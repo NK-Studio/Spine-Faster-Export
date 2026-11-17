@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use spine_model::{
-    ModelAttachment, ModelConstraint, ModelEvent, ModelKey, ModelSkin, ModelTimeline,
+    folder_cmp, scale_keys_43, sort_skins_40, ModelAttachment, ModelConstraint, ModelEvent, ModelKey, ModelSkin, ModelTimeline,
     SkeletonModel, SpineError, SpineResult,
 };
 
@@ -239,12 +239,16 @@ impl<'a> Writer<'a> {
         let iks = sorted_natural(&cons, "ik");
         let trs = sorted_natural(&cons, "transform");
         let paths = sorted_natural(&cons, "path");
-        let phys = sorted_natural(&cons, "physics");
-        let skins: Vec<&ModelSkin> = m
+        let mut phys: Vec<&ModelConstraint> = cons.iter().copied().filter(|c| c.type_str() == "physics").collect();
+        phys.sort_by(|a, b| folder_cmp(s(&a.name), s(&b.name)));
+        let mut skins: Vec<&ModelSkin> = m
             .skins
             .iter()
             .filter(|x| !x.attachments.is_empty() || s(&x.name) != "default")
             .collect();
+        if major == (4, 0) {
+            sort_skins_40(&mut skins);
+        }
         let mut strings = if m.strings.is_empty() {
             fallback_strings(m)
         } else {
@@ -725,7 +729,9 @@ impl<'a> Writer<'a> {
         ] {
             if v != 0.0 {
                 flags |= bit;
-                vs.push(v);
+                // 편집기는 이 값을 퍼센트로 다뤄 float 로 100 으로 나눈다(Spine 4.2.43 celestial-circus wing-front rotate
+                // 0.41045807 → 0.41045806)
+                vs.push(f64::from((v * 100.0) as f32 / 100.0));
             }
         }
         if c.limit != 5000.0 {
@@ -997,12 +1003,11 @@ impl<'a> Writer<'a> {
         }
         self.o.varint(by_slot.len() as i64);
         let mut slots = by_slot.items;
-        // 편집기는 슬롯 이름순, 그 안은 첨부 이름순
-        slots.sort_by(|a, b| nat_cmp(&a.0, &b.0));
-        for (slot, mut atts) in slots {
+        // 편집기는 슬롯을 트리 순서로([`folder_cmp`]), 그 안은 프로젝트에 저장된 순서(Spine 4.2.43: spineboy-ess muzzle04 가 muzzle01 앞)
+        slots.sort_by(|a, b| folder_cmp(&a.0, &b.0));
+        for (slot, atts) in slots {
             let i = self.slot(&slot)?;
             self.o.varint(i);
-            atts.sort_by(|a, b| nat_cmp(a.0, b.0));
             self.o.varint(atts.len() as i64);
             for (key, a) in atts {
                 self.rf(Some(key))?;
@@ -1130,13 +1135,19 @@ impl<'a> Writer<'a> {
         }
     }
 
-    /// 3.8 편집기는 정점 좌표를 소수 둘째 자리로 반올림해 쓴다(4.x 는 그대로).
-    fn vertex_xy(&self, v: f64) -> f64 {
-        if self.v38() {
-            round_half_up(v, 2)
-        } else {
-            v
+    /// 값이 같은 두 키 사이를 계단으로 낼지. 4.2 부터 바이너리는 IK 키를 계단으로 바꾸지 않는다
+    /// (Spine 4.2.43 · 4.3.26 raptor-pro gun-holster: JSON 은 stepped, .skel 은 직선. 4.0 · 4.1 은 계단).
+    fn same_key_stepped(&self, k: &ModelKey, nxt: &ModelKey, nch: usize) -> bool {
+        if self.v42() && vals(k).len() == 5 {
+            return false;
         }
+        same_key_stepped(k, nxt, nch)
+    }
+
+    /// 편집기는 정점 좌표를 반올림해 쓴다: 3.8 · 4.0 은 소수 둘째 자리, 4.1 부터는 다섯째 자리
+    /// (Spine 4.0.64 · 4.1.24 · 4.2.43 · 4.3.26 편집기 출력으로 확인).
+    fn vertex_xy(&self, v: f64) -> f64 {
+        round_half_up(v, if self.major < (4, 1) { 2 } else { 5 })
     }
 
     /// 가중치 정점: [뼈 수, (뼈 번호, x, y, 가중치)×뼈 수]×정점.
@@ -1385,7 +1396,7 @@ impl<'a> Writer<'a> {
         let v = a.vertices.as_deref().unwrap_or(&[]);
         if !a.weighted {
             for x in v {
-                self.o.float(*x);
+                self.o.float(self.vertex_xy(*x));
             }
             return;
         }
@@ -1429,6 +1440,8 @@ impl<'a> Writer<'a> {
         let mut trs: Ordered<&ModelTimeline> = Ordered::new();
         let mut deforms: Ordered<Ordered<Vec<&ModelTimeline>>> = Ordered::new();
         let mut events: Vec<&ModelKey> = Vec::new();
+        // 개수 힌트에는 이벤트 정의마다(합치기 전 타임라인마다) 하나씩 센다(Spine 4.2.43 편집기 출력)
+        let mut event_timelines = 0usize;
         let mut paths: Ordered<Vec<&ModelTimeline>> = Ordered::new();
         let mut phys: Ordered<Vec<&ModelTimeline>> = Ordered::new();
         let mut sliders: Ordered<Vec<&ModelTimeline>> = Ordered::new();
@@ -1445,7 +1458,10 @@ impl<'a> Writer<'a> {
                     .entry(s(&t.skin), Ordered::new)
                     .entry(s(&t.slot), Vec::new)
                     .push(t),
-                "event" => events.extend(t.keys.iter()),
+                "event" => {
+                    event_timelines += usize::from(!t.keys.is_empty());
+                    events.extend(t.keys.iter());
+                }
                 "pathPosition" | "pathSpacing" | "pathMix" => {
                     paths.entry(s(&t.constraint), Vec::new).push(t)
                 }
@@ -1476,7 +1492,7 @@ impl<'a> Writer<'a> {
             + iks.len()
             + trs.len()
             + deforms.items.iter().map(|(_, sk)| sum(sk)).sum::<usize>()
-            + (!events.is_empty()) as usize
+            + event_timelines
             + (!draw.is_empty()) as usize
             + sum(&paths)
             + sum(&phys)
@@ -1575,10 +1591,15 @@ impl<'a> Writer<'a> {
                 } else {
                     lookup(&self.phys_index, &n, "물리 제약")? as i64 + 1
                 };
-                ph.push((i, ts));
+                ph.push((n, i, ts));
             }
-            ph.sort_by_key(|x| x.0);
-            for (i, ts) in ph {
+            if v43 {
+                ph.sort_by_key(|x| x.1);
+            } else {
+                // 4.2: 제약 이름순, 모든 물리 제약(빈 이름)은 맨 뒤(Spine 4.2.43 celestial-circus wind-idle)
+                ph.sort_by(|a, b| a.0.is_empty().cmp(&b.0.is_empty()).then_with(|| nat_cmp(&a.0, &b.0)));
+            }
+            for (_, i, ts) in ph {
                 self.o.varint(i);
                 self.o.varint(ts.len() as i64);
                 for t in ts {
@@ -1670,7 +1691,7 @@ impl<'a> Writer<'a> {
         };
         // 3.8 프로젝트의 회전 키는 저장된 각도로 비교한다: -297.81 과 62.19 는 이어 붙이면 같은 값이지만 3.8 에서는 다른 키다
         let turned = matches!((k.angle38, nxt.angle38), (Some(a), Some(b)) if (a - b).abs() > 1e-6);
-        if cv == "stepped" || (!turned && same_key_stepped(k, nxt, nch)) || same_dense {
+        if cv == "stepped" || (!turned && self.same_key_stepped(k, nxt, nch)) || same_dense {
             self.o.byte(CURVE_STEPPED);
         } else if let Some(c) = k.curve38.filter(|c| *c != [0.0, 0.0, 1.0, 1.0]) {
             // (0, 0, 1, 1) 은 직선과 같아 편집기도 직선으로 쓴다
@@ -1939,7 +1960,7 @@ impl<'a> Writer<'a> {
     fn curve(&self, keys: &[ModelKey], i: usize, nch: usize) -> Curve {
         let (k, nxt) = (&keys[i], &keys[i + 1]);
         let cv = curve_str(k);
-        if cv == "stepped" || same_key_stepped(k, nxt, nch) {
+        if cv == "stepped" || self.same_key_stepped(k, nxt, nch) {
             return (CURVE_STEPPED, Vec::new());
         }
         if let (Some(d0), Some(d1)) = (&k.dense, &nxt.dense) {
@@ -2027,7 +2048,11 @@ impl<'a> Writer<'a> {
         } else {
             2
         };
-        self.typed_timeline(t, code, nch);
+        if ty == "scale" && self.v43() {
+            self.typed_timeline(&scale_keys_43(t), code, nch);
+        } else {
+            self.typed_timeline(t, code, nch);
+        }
         Ok(())
     }
 
@@ -2220,12 +2245,18 @@ impl<'a> Writer<'a> {
             if i > 0 {
                 self.write_curve(keys, i - 1, 1);
             }
-            // 바이너리는 정확히 0 인 앞뒤만 자른다(JSON 과 다름)
-            let first = vec.iter().position(|x| *x != 0.0);
+            // 앞뒤에서 셋업 위치와 0.0001 이내로 같은 값은 잘라낸다(JSON 은 0.01, float32 로 비교).
+            // Spine 4.2.43: alien-pro 의 float 잡음 -1.5e-5 는 자르고, spineboy-pro 의 1.2e-4 는 남긴다.
+            let setup = att.setup.as_deref().unwrap_or(&[]);
+            let moved = |j: usize| {
+                let s0 = setup.get(j).copied().unwrap_or(0.0);
+                f32r(f32r(s0 + vec[j]) - s0).abs() > f64::from(0.0001f32)
+            };
+            let first = (0..vec.len()).find(|&j| moved(j));
             match first {
                 None => self.o.varint(0),
                 Some(start) => {
-                    let end = vec.iter().rposition(|x| *x != 0.0).unwrap() + 1;
+                    let end = (0..vec.len()).rev().find(|&j| moved(j)).unwrap() + 1;
                     self.o.varint((end - start) as i64);
                     self.o.varint(start as i64);
                     for v in &vec[start..end] {
