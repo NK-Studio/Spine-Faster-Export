@@ -17,8 +17,15 @@ fn format_err(msg: String) -> SpineError {
     SpineError::Format(msg)
 }
 
-/// PNG 파일 → (너비, 높이, straight RGBA, 위쪽 줄부터).
+/// PNG 파일 → (너비, 높이, straight RGBA, 위쪽 줄부터). 읽기 오류에는 경로를 붙인다.
 pub fn decode_file(path: &Path) -> SpineResult<(u32, u32, Vec<u8>)> {
+    decode_file_at(path).map_err(|e| match e {
+        SpineError::Io(m) => SpineError::Io(format!("{}: {m}", path.display())),
+        other => other,
+    })
+}
+
+fn decode_file_at(path: &Path) -> SpineResult<(u32, u32, Vec<u8>)> {
     let shown = path.display().to_string();
     let file = File::open(path)?;
     let file_len = file.metadata()?.len();

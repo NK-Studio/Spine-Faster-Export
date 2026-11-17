@@ -1155,7 +1155,7 @@ fn read_pack_json(dir: &Path, base: &AtlasSettings) -> SpineResult<Option<AtlasS
     if !file.is_file() {
         return Ok(None);
     }
-    let text = std::fs::read_to_string(&file)?;
+    let text = std::fs::read_to_string(&file).map_err(|e| SpineError::Io(format!("{}: {e}", file.display())))?;
     merge_pack_json(base, &text).map(Some).map_err(|e| SpineError::Format(format!("{}: {e}", file.display())))
 }
 
@@ -1173,7 +1173,9 @@ pub fn folder_sources(model: &SkeletonModel, images_dir: &Path, settings: &Atlas
     // (폴더, 폴더 안 경로, 묶음 경로, 묶음 설정)
     let mut stack = vec![(images_dir.to_path_buf(), String::new(), String::new(), root)];
     while let Some((dir, prefix, group, unit)) = stack.pop() {
-        for entry in std::fs::read_dir(&dir)?.filter_map(|e| e.ok()) {
+        let io = |e: std::io::Error| SpineError::Io(format!("{}: {e}", dir.display()));
+        for entry in std::fs::read_dir(&dir).map_err(io)? {
+            let entry = entry.map_err(io)?;
             let path = entry.path();
             // 영역 이름은 NFC 로: macOS 는 한글 파일 이름을 NFD 로 돌려주지만 Spine 은 NFC 로 쓰고, 첨부 이름도 NFC 다
             let Some(file) = path.file_name().and_then(|f| f.to_str()).map(|f| f.nfc().collect::<String>()) else { continue };

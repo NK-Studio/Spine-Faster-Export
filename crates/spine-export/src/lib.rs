@@ -266,13 +266,13 @@ pub fn export_skeleton(
     let name = model.name.clone().unwrap_or_else(|| format!("skeleton{index}"));
     let file_name = sanitize_file_name(&name);
     let mut report = ExportReport { skeleton: name.clone(), ..Default::default() };
-    fs::create_dir_all(out_dir)?;
+    create_dir(out_dir)?;
 
     if opts.format.json() {
         let (text, notes) =
             spine_json::write_json_with_notes(&model, &version, opts.nonessential.unwrap_or(true), opts.json_format.style(), opts.pretty_print)?;
         let path = out_dir.join(format!("{file_name}{}", opts.json_ext));
-        fs::write(&path, text)?;
+        write_file(&path, text.as_bytes())?;
         report.files.push(path);
         report.notes.extend(notes.into_iter().map(|n| format!("{file_name}{}: {n}", opts.json_ext)));
     }
@@ -310,7 +310,7 @@ pub fn export_skeleton(
                 };
                 let data = spine_binary::write_binary(source, &version, opts.nonessential.unwrap_or(false))?;
                 let path = out_dir.join(format!("{file_name}{}", opts.skel_ext));
-                fs::write(&path, data)?;
+                write_file(&path, &data)?;
                 report.files.push(path);
             }
         }
@@ -380,11 +380,11 @@ fn write_atlas(
         }
         let atlas = packed.output;
         let atlas_path = out_dir.join(format!("{base}{suffix}{}", pack.atlas_extension));
-        fs::write(&atlas_path, &atlas.atlas_text)?;
+        write_file(&atlas_path, atlas.atlas_text.as_bytes())?;
         report.files.push(atlas_path);
         for page in &atlas.pages {
             let path = out_dir.join(&page.name);
-            fs::write(&path, spine_atlas::encode_page(page, pack)?)?;
+            write_file(&path, &spine_atlas::encode_page(page, pack)?)?;
             report.files.push(path);
         }
     }
@@ -405,7 +405,7 @@ pub fn wants_single_atlas(opts: &ExportOptions) -> bool {
 pub fn export_single_atlas(project: &SpineProject, indices: &[usize], spine_path: &Path, out_dir: &Path, opts: &ExportOptions) -> SpineResult<ExportReport> {
     let name = single_atlas_name(spine_path);
     let mut report = ExportReport { skeleton: format!("{name}{}", opts.pack.atlas_extension), ..Default::default() };
-    fs::create_dir_all(out_dir)?;
+    create_dir(out_dir)?;
     let mut lists = Vec::with_capacity(indices.len());
     let mut first_images: Option<PathBuf> = None;
     for &index in indices {
@@ -533,8 +533,26 @@ pub fn export_many<F: Fn(BatchItem) + Sync>(
         let n = done.fetch_add(1, Ordering::SeqCst) + 1;
         on_done(BatchItem { index, label, result, done: n, total });
     };
+    // 정리한 파일 이름이 겹치는 스켈레톤(a/b 와 a_b, 대소문자를 가리지 않는 macOS · Windows 의 Hero 와 hero)은
+    // 같은 파일에 동시에 쓰게 되므로 처음 것만 내보내고 나머지는 오류로 알린다
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut runnable = Vec::with_capacity(indices.len());
+    for &index in indices {
+        let name = names.get(index).filter(|n| !n.is_empty()).cloned().unwrap_or_else(|| format!("skeleton{index}"));
+        let key = sanitize_file_name(&name).to_lowercase();
+        match seen.get(&key) {
+            Some(&first) => {
+                let other = names.get(first).cloned().unwrap_or_default();
+                report(Some(index), name.clone(), Err(SpineError::Usage(format!("출력 파일 이름이 스켈레톤 \"{other}\" 와 겹칩니다: {name}"))));
+            }
+            None => {
+                seen.insert(key, index);
+                runnable.push(index);
+            }
+        }
+    }
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(total).max(1);
-    let queue = Mutex::new(indices.iter().copied());
+    let queue = Mutex::new(runnable.into_iter());
     std::thread::scope(|scope| {
         for _ in 0..threads {
             scope.spawn(|| loop {
@@ -552,6 +570,21 @@ pub fn export_many<F: Fn(BatchItem) + Sync>(
         }
     });
     counts.into_inner().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 같은 폴더의 임시 파일(점으로 시작해 Unity 가 가져오지 않는다)에 쓴 뒤 이름을 바꾼다. 쓰다가 실패해도 기존
+/// 출력이 반쯤 잘린 채 남지 않는다. 오류에는 경로를 넣는다.
+fn write_file(path: &Path, bytes: &[u8]) -> SpineResult<()> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    fs::write(&tmp, bytes).and_then(|()| fs::rename(&tmp, path)).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        SpineError::Io(format!("{}: {e}", path.display()))
+    })
+}
+
+fn create_dir(dir: &Path) -> SpineResult<()> {
+    fs::create_dir_all(dir).map_err(|e| SpineError::Io(format!("{}: {e}", dir.display())))
 }
 
 /// 한 작업의 panic 을 그 작업의 오류로 바꾼다. 스켈레톤 하나가 panic 해도 나머지는 끝까지 내보내고,
@@ -771,6 +804,22 @@ fn missing_note(missing: &[String], images: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_file_replaces_and_names_path() {
+        let dir = std::env::temp_dir().join(format!("qs-write-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.skel");
+        write_file(&path, b"old").unwrap();
+        write_file(&path, b"new").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        // 임시 파일이 남지 않는다
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        // 오류에 경로가 들어간다
+        let bad = dir.join("missing").join("b.skel");
+        assert!(matches!(write_file(&bad, b"x"), Err(SpineError::Io(m)) if m.contains("b.skel")));
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn panic_becomes_error() {
