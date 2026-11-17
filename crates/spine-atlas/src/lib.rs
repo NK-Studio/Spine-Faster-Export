@@ -1067,7 +1067,8 @@ pub fn pack_sources_scales(sources: &[Source], name: &str, settings: &AtlasSetti
             }
         }
     }
-    suffixes.into_iter().map(|suffix| pack_at(sources, &format!("{name}{suffix}"), settings, &suffix).map(|r| (suffix, r))).collect()
+    // 배율마다 독립이라 함께 돌린다(collect 가 순서를 지킨다)
+    suffixes.into_par_iter().map(|suffix| pack_at(sources, &format!("{name}{suffix}"), settings, &suffix).map(|r| (suffix, r))).collect()
 }
 
 /// atlas 에 넣을 이미지 하나.
