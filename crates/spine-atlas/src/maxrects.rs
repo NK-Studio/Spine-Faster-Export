@@ -471,28 +471,40 @@ impl Bin {
 // - 모두 넣어야 하는 시험은 남은 넓이가 빈 넓이보다 크면 바로 그만둔다(결과를 쓰지 않는다).
 
 use rayon::prelude::*;
-use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
 
-/// 좌표(i32) 열쇠용 가벼운 해시.
-#[derive(Default)]
-struct CoordHasher(u64);
-
-impl Hasher for CoordHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-    fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.0 = (self.0 ^ b as u64).wrapping_mul(0x100000001b3);
-        }
-    }
-    fn write_i32(&mut self, v: i32) {
-        self.0 = (v as u32 as u64).wrapping_mul(0x9E3779B97F4A7C15);
-    }
+/// 좌표(0 ~ 페이지 폭·높이)를 그대로 번호로 쓰는 목록. 해시맵보다 접촉 계산이 빠르다.
+/// 넣은 칸을 기억해 두었다가 `clear` 는 그 칸만 비운다.
+struct Lines<T> {
+    at: Vec<Vec<T>>,
+    touched: Vec<usize>,
 }
 
-type Map<V> = HashMap<i32, V, BuildHasherDefault<CoordHasher>>;
+impl<T> Lines<T> {
+    fn new(size: i32) -> Lines<T> {
+        Lines { at: (0..=size.max(0)).map(|_| Vec::new()).collect(), touched: Vec::new() }
+    }
+
+    fn get(&self, k: i32) -> &[T] {
+        usize::try_from(k).ok().and_then(|k| self.at.get(k)).map_or(&[], |v| v)
+    }
+
+    fn push(&mut self, k: i32, x: T) {
+        let k = usize::try_from(k).expect("좌표는 0 이상");
+        if k >= self.at.len() {
+            self.at.resize_with(k + 1, Vec::new);
+        }
+        if self.at[k].is_empty() {
+            self.touched.push(k);
+        }
+        self.at[k].push(x);
+    }
+
+    fn clear(&mut self) {
+        for k in self.touched.drain(..) {
+            self.at[k].clear();
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Cache {
@@ -521,10 +533,11 @@ struct Quick {
     ids: Vec<u32>,
     next_id: u32,
     used_area: i64,
-    left: Map<Vec<R>>,
-    right: Map<Vec<R>>,
-    bottom: Map<Vec<R>>,
-    top: Map<Vec<R>>,
+    /// 놓인 사각형의 변: 왼쪽 변(x)·오른쪽 변(x+w) 마다 세로 구간, 아래 변(y)·위 변(y+h) 마다 가로 구간.
+    left: Lines<(i32, i32)>,
+    right: Lines<(i32, i32)>,
+    bottom: Lines<(i32, i32)>,
+    top: Lines<(i32, i32)>,
     used: Vec<R>,
     removed: Vec<u32>,
     /// `full` 을 빨리 찾으려고 정렬해 둔 빈칸(이 방법일 때만). ContactPoint 는 쓰지 않는다.
@@ -545,10 +558,10 @@ impl Quick {
             ids: vec![0],
             next_id: 1,
             used_area: 0,
-            left: Map::default(),
-            right: Map::default(),
-            bottom: Map::default(),
-            top: Map::default(),
+            left: Lines::new(w),
+            right: Lines::new(w),
+            bottom: Lines::new(h),
+            top: Lines::new(h),
             used: Vec::new(),
             removed: Vec::new(),
             indexed: None,
@@ -668,19 +681,11 @@ impl Quick {
         if y == 0 || y + h == self.h {
             score += w;
         }
-        for map_key in [(&self.left, x + w), (&self.right, x)] {
-            if let Some(v) = map_key.0.get(&map_key.1) {
-                for r in v {
-                    score += common(r.y, r.y + r.h, y, y + h);
-                }
-            }
+        for &(a, b) in self.left.get(x + w).iter().chain(self.right.get(x)) {
+            score += common(a, b, y, y + h);
         }
-        for map_key in [(&self.bottom, y + h), (&self.top, y)] {
-            if let Some(v) = map_key.0.get(&map_key.1) {
-                for r in v {
-                    score += common(r.x, r.x + r.w, x, x + w);
-                }
-            }
+        for &(a, b) in self.bottom.get(y + h).iter().chain(self.top.get(y)) {
+            score += common(a, b, x, x + w);
         }
         score
     }
@@ -775,10 +780,10 @@ impl Quick {
         self.prune(start);
         self.used.push(u);
         self.used_area += u.w as i64 * u.h as i64;
-        self.left.entry(u.x).or_default().push(u);
-        self.right.entry(u.x + u.w).or_default().push(u);
-        self.bottom.entry(u.y).or_default().push(u);
-        self.top.entry(u.y + u.h).or_default().push(u);
+        self.left.push(u.x, (u.y, u.y + u.h));
+        self.right.push(u.x + u.w, (u.y, u.y + u.h));
+        self.bottom.push(u.y, (u.x, u.x + u.w));
+        self.top.push(u.y + u.h, (u.x, u.x + u.w));
         self.reindex();
         start
     }
@@ -903,8 +908,8 @@ impl Quick {
         let mut caches: Vec<Cache> = rest.iter().map(|it| self.full(m, it)).collect();
         let mut out = Vec::new();
         let mut rest_area: i64 = if fully { rest.iter().map(|it| self.min_area(it)).sum() } else { 0 };
-        let mut by_x: Map<Vec<usize>> = Map::default();
-        let mut by_y: Map<Vec<usize>> = Map::default();
+        let mut by_x: Lines<usize> = Lines::new(self.w);
+        let mut by_y: Lines<usize> = Lines::new(self.h);
         let mut gone: Vec<bool> = Vec::new();
         let mut cands: Vec<usize> = Vec::new();
         let mut sizes: Vec<(i32, i32)> = Vec::new();
@@ -951,8 +956,8 @@ impl Quick {
                 by_x.clear();
                 by_y.clear();
                 for (i, f) in self.free.iter().enumerate() {
-                    by_x.entry(f.x).or_default().push(i);
-                    by_y.entry(f.y).or_default().push(i);
+                    by_x.push(f.x, i);
+                    by_y.push(f.y, i);
                 }
             }
             // 남은 영역마다 기억한 자리를 고친다. 다시 찾은 자리와 새로 생긴 후보는 영역 크기로만 정해지므로 크기마다
@@ -980,9 +985,7 @@ impl Quick {
                         cands.clear();
                         for (cw, ch) in [(w, h), (rw, rh)] {
                             for (map, k2) in [(&by_x, u.x + u.w), (&by_x, u.x - cw), (&by_y, u.y + u.h), (&by_y, u.y - ch)] {
-                                if let Some(v) = map.get(&k2) {
-                                    cands.extend(v.iter().copied().filter(|&i| i < first_new));
-                                }
+                                cands.extend(map.get(k2).iter().copied().filter(|&i| i < first_new));
                             }
                         }
                         for &i in cands.iter() {
