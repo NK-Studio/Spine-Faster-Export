@@ -1,12 +1,8 @@
-//! 편집기의 이름 정렬(C# `NaturalComparer`)과 .NET `StringComparer.Ordinal`.
+//! 편집기의 이름 정렬(C# `NaturalComparer`).
 //! C# 문자열은 UTF-16 코드 단위로 비교하므로 여기서도 UTF-16 으로 바꿔 비교한다.
 
 use std::cmp::Ordering;
 
-/// .NET `string.CompareOrdinal`: UTF-16 코드 단위 순서.
-pub(crate) fn ordinal_cmp(a: &str, b: &str) -> Ordering {
-    a.encode_utf16().cmp(b.encode_utf16())
-}
 
 /// 유니코드 Nd(십진 숫자) 문자 묶음의 0 자리(BMP). 각 묶음은 0~9 열 글자가 이어진다.
 const ND_ZEROS: &[u16] = &[
@@ -128,12 +124,5 @@ mod tests {
         assert_eq!(natural_cmp("a١٢", "a3"), Ordering::Greater); // 아라비아 숫자 12 > 3
         assert_eq!(natural_cmp("line_front", "Line_root"), Ordering::Less); // 대소문자는 끝까지 같을 때만
         assert_eq!(natural_cmp("Line_root", "line_root"), Ordering::Less);
-    }
-
-    #[test]
-    fn ordinal() {
-        assert_eq!(ordinal_cmp("B", "a"), Ordering::Less);
-        // UTF-16 순서: U+FF5E > U+1F600(대리 쌍 0xD83D...)
-        assert_eq!(ordinal_cmp("\u{FF5E}", "\u{1F600}"), Ordering::Greater);
     }
 }

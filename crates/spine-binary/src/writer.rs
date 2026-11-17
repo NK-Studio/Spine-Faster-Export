@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use spine_model::{
-    folder_cmp, scale_keys_43, sort_skins_40, ModelAttachment, ModelConstraint, ModelEvent, ModelKey, ModelSkin, ModelTimeline,
+    folder_cmp, physics_timeline, scale_keys_43, sort_skins_40, ModelAttachment, ModelConstraint, ModelEvent, ModelKey, ModelSkin, ModelTimeline,
     SkeletonModel, SpineError, SpineResult,
 };
 
@@ -179,7 +179,8 @@ fn sorted_natural<'a>(cons: &[&'a ModelConstraint], ty: &str) -> Vec<&'a ModelCo
         .copied()
         .filter(|c| c.type_str() == ty)
         .collect();
-    v.sort_by(|a, b| nat_cmp(s(&a.name), s(&b.name)));
+    // 편집기 트리 순서(폴더 밖이 먼저, Spine 4.2.43 snowglobe: face-holder 가 blue-present/… 앞)
+    v.sort_by(|a, b| folder_cmp(s(&a.name), s(&b.name)));
     v
 }
 
@@ -1465,15 +1466,16 @@ impl<'a> Writer<'a> {
                 "pathPosition" | "pathSpacing" | "pathMix" => {
                     paths.entry(s(&t.constraint), Vec::new).push(t)
                 }
-                "physicsWind" => {
-                    // 빈 이름은 "모든 물리 제약"(physicsWindAll) 자리라 대상이 없으면 오류로 둔다
-                    let c = t.constraint.as_deref().filter(|c| !c.is_empty());
-                    let c = c.ok_or_else(|| {
-                        err("물리 제약 타임라인에 대상 제약이 없습니다".to_string())
-                    })?;
-                    phys.entry(c, Vec::new).push(t)
+                ty if physics_timeline(ty).is_some() => {
+                    if physics_timeline(ty).is_some_and(|(_, all)| all) {
+                        phys.entry("", Vec::new).push(t)
+                    } else {
+                        // 빈 이름은 "모든 물리 제약" 자리라 대상이 없으면 오류로 둔다
+                        let c = t.constraint.as_deref().filter(|c| !c.is_empty());
+                        let c = c.ok_or_else(|| err("물리 제약 타임라인에 대상 제약이 없습니다".to_string()))?;
+                        phys.entry(c, Vec::new).push(t)
+                    }
                 }
-                "physicsWindAll" => phys.entry("", Vec::new).push(t),
                 "sliderMix" => sliders.entry(s(&t.constraint), Vec::new).push(t),
                 "drawOrder" => draw = &t.keys,
                 _ => {}
@@ -1603,7 +1605,26 @@ impl<'a> Writer<'a> {
                 self.o.varint(i);
                 self.o.varint(ts.len() as i64);
                 for t in ts {
-                    self.typed_timeline(t, 5, 1);
+                    // 런타임 SkeletonBinary 의 PHYSICS_* 번호. reset 은 곡선 없이 시간만
+                    let name = physics_timeline(t.type_str()).map_or("", |p| p.0);
+                    if name == "reset" {
+                        self.o.byte(8);
+                        self.o.varint(t.keys.len() as i64);
+                        for k in &t.keys {
+                            self.o.float(self.sec(k.frame));
+                        }
+                        continue;
+                    }
+                    let code = match name {
+                        "inertia" => 0,
+                        "strength" => 1,
+                        "damping" => 2,
+                        "mass" => 4,
+                        "gravity" => 6,
+                        "mix" => 7,
+                        _ => 5, // wind
+                    };
+                    self.typed_timeline(t, code, 1);
                 }
             }
         }

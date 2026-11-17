@@ -18,14 +18,14 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use spine_model::{
-    folder_cmp, scale_keys_43, sort_skins_40, ModelAnimation, ModelAttachment, ModelBone, ModelConstraint, ModelEvent, ModelFromProperty, ModelKey, ModelSkin, ModelSkinEntry, ModelSlot, ModelTimeline,
+    folder_cmp, physics_timeline, scale_keys_43, sort_skins_40, ModelAnimation, ModelAttachment, ModelBone, ModelConstraint, ModelEvent, ModelFromProperty, ModelKey, ModelSkin, ModelSkinEntry, ModelSlot, ModelTimeline,
     ModelToProperty, SkeletonModel, SpineError, SpineResult,
 };
 
 use json::{dumps_styled, write_map_entries, JsonMap, J};
 
 pub use json::JsonFormat;
-use natural::{natural_cmp, ordinal_cmp};
+use natural::natural_cmp;
 use numbers::{f32r, fmt_f32, fmt_round_f32, round_half_up};
 
 /// 숫자 표기 함수(다른 출력기·테스트에서 쓸 수 있게 공개).
@@ -1239,14 +1239,16 @@ impl<'a> Writer<'a> {
                         .get_or_add_map(key(&t.attachment))
                         .set("sequence", J::List(keys));
                 }
-                "physicsWind" => {
-                    // 바람 값과 곡선은 소수 넷째 자리(Spine 4.2.43 celestial-circus wind-idle: -6.3803)
-                    let keys = self.value_keys(t, 0.0, Scale);
-                    sec.get_or_add_map("physics").get_or_add_map(key(&t.constraint)).set("wind", J::List(keys));
-                }
-                "physicsWindAll" => {
-                    let keys = self.value_keys(t, 0.0, Scale);
-                    sec.get_or_add_map("physics").get_or_add_map("").set("wind", J::List(keys));
+                ty if physics_timeline(ty).is_some() => {
+                    let (name, all) = physics_timeline(ty).expect("위에서 확인");
+                    let keys = if name == "reset" {
+                        t.keys.iter().map(|k| J::Map(self.key_base(k))).collect()
+                    } else {
+                        // 값과 곡선은 소수 넷째 자리(Spine 4.2.43 celestial-circus wind-idle: -6.3803)
+                        self.value_keys(t, 0.0, Scale)
+                    };
+                    let target = if all { "" } else { key(&t.constraint) };
+                    sec.get_or_add_map("physics").get_or_add_map(target).set(name, J::List(keys));
                 }
                 "sliderMix" => {
                     let keys = self.value_keys(t, 1.0, Mix);
@@ -1721,8 +1723,9 @@ fn deform_vector(att: &ModelAttachment, k: &ModelKey) -> Vec<f64> {
 
 fn sorted_of_type<'m>(cons: &'m [ModelConstraint], ty: &str) -> Vec<&'m ModelConstraint> {
     let mut v: Vec<&ModelConstraint> = cons.iter().filter(|c| eq(&c.r#type, ty)).collect();
+    // 편집기 트리 순서(폴더 밖이 먼저, Spine 4.2.43 snowglobe: face-holder 가 blue-present/… 앞)
     v.sort_by(|a, b| match (&a.name, &b.name) {
-        (Some(x), Some(y)) => ordinal_cmp(x, y),
+        (Some(x), Some(y)) => folder_cmp(x, y),
         (x, y) => x.is_some().cmp(&y.is_some()),
     });
     v

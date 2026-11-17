@@ -512,6 +512,27 @@ pub fn sort_skins_40(skins: &mut [&ModelSkin]) {
     });
 }
 
+/// 물리 타임라인 타입(`physicsWind`, `physicsStrengthAll` …) → (JSON 이름, 모든 물리 제약 대상인지).
+pub fn physics_timeline(ty: &str) -> Option<(&'static str, bool)> {
+    let rest = ty.strip_prefix("physics")?;
+    let (name, all) = match rest.strip_suffix("All") {
+        Some(n) => (n, true),
+        None => (rest, false),
+    };
+    let json = match name {
+        "Inertia" => "inertia",
+        "Strength" => "strength",
+        "Damping" => "damping",
+        "Mass" => "mass",
+        "Wind" => "wind",
+        "Gravity" => "gravity",
+        "Mix" => "mix",
+        "Reset" => "reset",
+        _ => return None,
+    };
+    Some((json, all))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,6 +548,14 @@ mod tests {
         v.reverse();
         v.sort_by(|a, b| folder_cmp(a, b));
         assert_eq!(v, want);
+    }
+
+    #[test]
+    fn physics_names() {
+        assert_eq!(physics_timeline("physicsWind"), Some(("wind", false)));
+        assert_eq!(physics_timeline("physicsResetAll"), Some(("reset", true)));
+        assert_eq!(physics_timeline("physicsMassAll"), Some(("mass", true)));
+        assert_eq!(physics_timeline("translate"), None);
     }
 
     #[test]

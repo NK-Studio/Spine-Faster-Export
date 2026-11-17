@@ -221,7 +221,12 @@ pub fn images_dir(model: &SkeletonModel, spine_path: &Path, override_dir: Option
 
 /// 버전을 정한다(비었으면 프로젝트 포맷).
 pub fn resolve_version(project: &SpineProject, opts: &ExportOptions) -> SpineResult<String> {
-    let v = if opts.version.trim().is_empty() { project.format_version().to_string() } else { opts.version.trim().to_string() };
+    // 프로젝트 버전의 꼬리(4.2.32-beta 의 -beta)는 뗀다. 런타임은 주·부 번호만 본다
+    let v = if opts.version.trim().is_empty() {
+        project.format_version().split('-').next().unwrap_or_default().to_string()
+    } else {
+        opts.version.trim().to_string()
+    };
     check_version(&v)?;
     Ok(v)
 }

@@ -35,8 +35,23 @@ fn timeline_info(ty: i64) -> Option<(&'static str, i32)> {
         14 => ("translatex", 1),
         15 => ("translatey", 1),
         22 => ("sequence", 3),
+        // 물리: 23~30 은 제약 하나, 32~39 는 모든 물리 제약(Spine 4.2 cloud-pot 의 reset 30, sack 의 strength 24 로 확인)
+        23 => ("physicsInertia", 1),
+        24 => ("physicsStrength", 1),
+        25 => ("physicsDamping", 1),
+        26 => ("physicsMass", 1),
         27 => ("physicsWind", 1),
+        28 => ("physicsGravity", 1),
+        29 => ("physicsMix", 1),
+        30 => ("physicsReset", 0),
+        32 => ("physicsInertiaAll", 1),
+        33 => ("physicsStrengthAll", 1),
+        34 => ("physicsDampingAll", 1),
+        35 => ("physicsMassAll", 1),
         36 => ("physicsWindAll", 1),
+        37 => ("physicsGravityAll", 1),
+        38 => ("physicsMixAll", 1),
+        39 => ("physicsResetAll", 0),
         40 => ("sliderMix", 1),
         _ => return None,
     })
@@ -1175,7 +1190,7 @@ impl<'a> Reader<'a> {
             9 | 10 | 11 => 8,
             12 => 4,
             22 => 3,
-            27 | 40 => 11,
+            23..=30 | 40 => 11,
             _ => return None,
         };
         self.p.get_node(Some(tl), tag, GK::Node)
@@ -1202,9 +1217,8 @@ impl<'a> Reader<'a> {
                 let skin = self.p.get_node(att, 32, self.c.skin);
                 t.skin = if skin.is_some() { self.skin_name(skin)? } else { Some("default".into()) };
             }
-            "ik" | "transform" | "pathPosition" | "pathSpacing" | "pathMix" | "physicsWind" | "sliderMix" => {
-                t.constraint = self.name(extra)
-            }
+            "ik" | "transform" | "pathPosition" | "pathSpacing" | "pathMix" | "sliderMix" => t.constraint = self.name(extra),
+            k if k.starts_with("physics") && !k.ends_with("All") => t.constraint = self.name(extra),
             "sequence" => {
                 let att = if new_style {
                     let doc = self.p.doc;

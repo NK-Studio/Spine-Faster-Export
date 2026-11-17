@@ -812,7 +812,11 @@ impl<'a> Parser<'a> {
     }
 
     fn read_field(&mut self, node: NodeId, cls: Cls, key: u32, tat: usize) -> R<()> {
-        let ty = self.s.class(cls).fields.as_ref().and_then(|f| f.get(self.keys.name(key)).copied());
+        let fields = self.s.class(cls).fields.as_ref();
+        let name = self.keys.name(key);
+        // 같은 태그가 거듭 나오면 앞에 d 를 붙인 이름이 된다. 스키마에 없으면 원래 태그의 종류로 읽는다
+        // (4.2.61-beta 의 AnimExtra 는 12 가 다섯 번 나온다)
+        let ty = fields.and_then(|f| f.get(name).or_else(|| f.get(name.trim_start_matches('d'))).copied());
         let Some(ty) = ty else {
             return Err(self.fail_at(format!("모르는 필드 {}.{}", self.s.class_name(cls), self.keys.name(key)), tat));
         };

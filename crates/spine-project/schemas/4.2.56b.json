@@ -859,7 +859,9 @@
     }
   },
   "formats": [
-    "4.2.56-beta"
+    "4.2.32-beta",
+    "4.2.56-beta",
+    "4.2.61-beta"
   ],
   "kinds": {
     "AnimExtra": "tagged",
