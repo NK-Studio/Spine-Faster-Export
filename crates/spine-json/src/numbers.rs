@@ -571,7 +571,7 @@ mod tests {
     fn round_f32_shortest() {
         // Spine 4.2.43 alien-pro · owl-pro 의 변형 값
         assert_eq!(super::fmt_round_f32(-180.95550537109375, 5), "-180.9555");
-        assert_eq!(super::fmt_round_f32(129.83381652832031, 5), "129.83382");
+        assert_eq!(super::fmt_round_f32(f64::from(129.833_82_f32), 5), "129.83382");
         assert_eq!(super::fmt_round_f32(-92.23505, 5), "-92.23505");
         assert_eq!(super::fmt_round_f32(3.0, 2), "3");
     }
