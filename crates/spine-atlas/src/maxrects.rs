@@ -621,6 +621,11 @@ impl Quick {
             if rot && !self.rotation {
                 continue;
             }
+            // ContactPoint: 접촉 길이는 둘레 2(w+h) 를 넘지 못한다. 그 상한도 지금 기억한 접촉보다 작으면 이길 수 없으니
+            // 비싼 접촉 계산을 건너뛴다(같으면 번호로 갈리므로 계산한다)
+            if m == Method::ContactPoint && c.has && 2 * (cw as i64 + ch as i64) < -c.key.0 {
+                continue;
+            }
             if let Some((key, node)) = self.cand(m, f, cw, ch, it, rot) {
                 if !c.has || key < c.key || (key == c.key && (id, rot) < c.pos()) {
                     *c = Cache { has: true, key, fid: id, rot, node };
@@ -832,45 +837,57 @@ impl Quick {
                     by_y.entry(f.y).or_default().push(i);
                 }
             }
-            for (k, c) in caches.iter_mut().enumerate() {
+            // 남은 영역마다 기억한 자리를 고친다. 영역끼리 독립이고 빈칸은 읽기만 하므로 많으면 나눠 돌린다
+            // (방법 5개를 함께 돌릴 때 가장 느린 ContactPoint 가 끝날 때까지 다른 코어가 놀던 것을 쓴다)
+            let q = &*self;
+            let gone = &gone;
+            let (by_x, by_y) = (&by_x, &by_y);
+            let update = |cands: &mut Vec<usize>, (c, it): (&mut Cache, &Item)| {
                 if !c.has {
-                    continue; // 새 빈칸은 옛 빈칸 안에 있으므로 들어갈 곳이 생기지 않는다
+                    return; // 새 빈칸은 옛 빈칸 안에 있으므로 들어갈 곳이 생기지 않는다
                 }
-                let it = &rest[k];
                 if gone[c.fid as usize] {
-                    *c = self.full(m, it);
-                    continue;
+                    *c = q.full(m, it);
+                    return;
                 }
                 if m == Method::ContactPoint {
                     // 지금 자리의 점수도 늘었을 수 있다
-                    let bi = self.ids.partition_point(|&id| id < c.fid);
+                    let bi = q.ids.partition_point(|&id| id < c.fid);
                     let (w, h) = (c.node.w, c.node.h);
-                    let f = self.free[bi];
-                    let (key, node) = self.cand(m, f, w, h, it, c.rot).expect("기억한 자리는 그대로 맞는다");
+                    let f = q.free[bi];
+                    let (key, node) = q.cand(m, f, w, h, it, c.rot).expect("기억한 자리는 그대로 맞는다");
                     c.key = key;
                     c.node = node;
-                    let (w, h, rw, rh) = self.dims(it);
+                    let (w, h, rw, rh) = q.dims(it);
                     cands.clear();
                     for (cw, ch) in [(w, h), (rw, rh)] {
-                        for (map, k2) in [(&by_x, u.x + u.w), (&by_x, u.x - cw), (&by_y, u.y + u.h), (&by_y, u.y - ch)] {
+                        for (map, k2) in [(by_x, u.x + u.w), (by_x, u.x - cw), (by_y, u.y + u.h), (by_y, u.y - ch)] {
                             if let Some(v) = map.get(&k2) {
                                 cands.extend(v.iter().copied().filter(|&i| i < first_new));
                             }
                         }
                     }
-                    for &i in &cands {
-                        self.offer(m, i, it, c);
+                    for &i in cands.iter() {
+                        q.offer(m, i, it, c);
                     }
                 }
-                for i in first_new..self.free.len() {
-                    self.offer(m, i, it, c);
+                for i in first_new..q.free.len() {
+                    q.offer(m, i, it, c);
                 }
+            };
+            if caches.len() >= PARALLEL_UPDATE {
+                caches.par_iter_mut().zip(rest.par_iter()).for_each_init(Vec::new, update);
+            } else {
+                caches.iter_mut().zip(rest.iter()).for_each(|x| update(&mut cands, x));
             }
         }
         let (w, h) = self.result();
         Trial { out, remaining: rest, w, h }
     }
 }
+
+/// 남은 영역이 이만큼 이상이면 기억한 자리 고치기를 나눠 돌린다(적으면 나누는 비용이 더 크다).
+const PARALLEL_UPDATE: usize = 256;
 
 fn common(a0: i32, a1: i32, b0: i32, b1: i32) -> i32 {
     if a1 < b0 || b1 < a0 {
