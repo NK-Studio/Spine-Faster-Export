@@ -8,6 +8,8 @@ export type ThemePref = "system" | "dark" | "light";
 export interface AppSettings {
   theme: ThemePref;
   lang: LangPref;
+  /** 새 버전이 나오면 알리기(켤 때와 6시간마다 확인, update.ts). */
+  updateAuto: boolean;
 }
 
 export interface SettingsDialogOptions {
@@ -16,6 +18,8 @@ export interface SettingsDialogOptions {
   busy: boolean;
   /** 값을 고를 때마다 부른다(바로 적용). */
   onChange: (next: AppSettings) => void;
+  /** «지금 확인» 을 누르면(메뉴의 «업데이트 확인…» 과 같다). */
+  onCheckUpdate: () => void;
 }
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -61,6 +65,15 @@ export function openSettingsDialog(o: SettingsDialogOptions) {
           ${selectHtml('id="set-lang"', [["system", t("시스템")], ...LANGS], o.current.lang, !o.busy, t("앱 화면과 메뉴에 쓸 언어"), "system")}
           <div class="hint">${esc(o.busy ? t("내보내는 중에는 언어를 바꿀 수 없습니다.") : t("시스템: 운영체제 설정을 따릅니다"))}</div>
         </div>
+        <div class="set-field">
+          <span class="set-lbl">${esc(t("업데이트"))}</span>
+          <div class="set-row">
+            <label class="check"><input type="checkbox" class="tri-check" id="set-update-auto"${o.current.updateAuto ? " checked" : ""} />${esc(t("새 버전이 나오면 알리기"))}</label>
+            <span class="grow"></span>
+            <button type="button" class="btn" id="set-update-check">${esc(t("지금 확인"))}</button>
+          </div>
+          <div class="hint">${esc(t("앱을 켤 때와 그 뒤 6시간마다 새 버전이 있는지 봅니다."))}</div>
+        </div>
       </div>
     </div>
     <div class="m-foot"><button class="btn primary" data-act="ok">${esc(t("확인"))}</button></div>
@@ -79,12 +92,18 @@ export function openSettingsDialog(o: SettingsDialogOptions) {
   const apply = () => {
     const theme = back.querySelector<HTMLSelectElement>("#set-theme")!.value as ThemePref;
     const lang = back.querySelector<HTMLSelectElement>("#set-lang")!.value as LangPref;
-    if (theme === cur.theme && lang === cur.lang) return;
-    cur = { theme, lang };
+    const updateAuto = back.querySelector<HTMLInputElement>("#set-update-auto")!.checked;
+    if (theme === cur.theme && lang === cur.lang && updateAuto === cur.updateAuto) return;
+    cur = { theme, lang, updateAuto };
     o.onChange(cur);
   };
   back.querySelector<HTMLSelectElement>("#set-theme")!.addEventListener("change", apply);
   back.querySelector<HTMLSelectElement>("#set-lang")!.addEventListener("change", apply);
+  back.querySelector<HTMLInputElement>("#set-update-auto")!.addEventListener("change", apply);
+  back.querySelector<HTMLElement>("#set-update-check")!.onclick = () => {
+    close();
+    o.onCheckUpdate();
+  };
   back.querySelector<HTMLElement>('[data-act="ok"]')!.onclick = close;
   back.addEventListener("mousedown", (e) => e.target === back && close());
   back.addEventListener("keydown", (e) => {

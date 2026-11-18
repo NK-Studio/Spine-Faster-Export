@@ -19,6 +19,9 @@ serde_json.workspace = true
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+# 앱 업데이트(update.rs): 매니페스트·설치 파일을 받고(시스템 인증서), 설치 파일의 SHA-256 을 맞춰 본다.
+ureq = { version = "2.12.1", features = ["native-certs"] }
+sha2 = "0.10"
 
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"

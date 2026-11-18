@@ -31,6 +31,28 @@ const en: Record<string, string> = {
   "언어를 바꾸면 창을 다시 그립니다. 열린 프로젝트는 그대로 둡니다.": "Changing the language redraws the window. The open project stays open.",
   "내보내는 중에는 언어를 바꿀 수 없습니다.": "The language can't be changed while exporting.",
 
+  // 앱 업데이트(update.ts · 설정 창)
+  "업데이트": "Updates",
+  "새 버전이 나오면 알리기": "Notify me when a new version is out",
+  "지금 확인": "Check Now",
+  "앱을 켤 때와 그 뒤 6시간마다 새 버전이 있는지 봅니다.": "Checks for a new version at launch and every 6 hours after.",
+  "Quick Spine {version}(으)로 업데이트했습니다.": "Updated to Quick Spine {version}.",
+  "이 빌드는 업데이트를 확인하지 않습니다.": "This build doesn't check for updates.",
+  "최신 버전입니다 (Quick Spine {version}).": "You're up to date (Quick Spine {version}).",
+  "업데이트를 확인하지 못했습니다": "Couldn't check for updates",
+  "새 버전이 있습니다": "A new version is available",
+  "Quick Spine {version}을(를) 쓸 수 있습니다. 지금은 {current}입니다.": "Quick Spine {version} is available. You have {current}.",
+  "새로 바뀐 내용": "What's new",
+  "적힌 내용이 없습니다.": "No notes for this version.",
+  "이 버전 건너뛰기": "Skip This Version",
+  "나중에": "Later",
+  "업데이트하고 다시 시작": "Update and Restart",
+  "내려받기 페이지 열기": "Open Download Page",
+  "내보내기가 끝난 뒤에 업데이트해 주세요.": "Please update after the export finishes.",
+  "내려받는 중…": "Downloading…",
+  "내려받는 중… {done} / {total}": "Downloading… {done} / {total}",
+  "설치를 시작했습니다. Quick Spine 을 다시 시작합니다…": "Installing. Quick Spine will restart…",
+
   // 화면 뼈대
   "입력": "Input",
   "프로젝트": "Project",

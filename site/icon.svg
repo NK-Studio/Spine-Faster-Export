@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff6a1f"/>
+      <stop offset="1" stop-color="#f23a00"/>
+    </linearGradient>
+    <!-- 번개를 척추뼈처럼 네 마디로 자르는 틈 -->
+    <mask id="slices" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <g stroke="#000" stroke-width="30" transform="rotate(-7 512 512)">
+        <path d="M150 318 H874"/>
+        <path d="M150 512 H874"/>
+        <path d="M150 684 H874"/>
+      </g>
+    </mask>
+  </defs>
+
+  <!-- 바탕 -->
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bg)"/>
+  <rect x="103" y="103" width="818" height="818" rx="183" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="6"/>
+
+  <!-- 척추뼈 마디로 이루어진 번개 -->
+  <g mask="url(#slices)">
+    <path d="M500 196 L676 196 L572 446 L704 446 L404 846 L474 576 L330 576 Z"
+          fill="#fff7ef" stroke="#fff7ef" stroke-width="44" stroke-linejoin="round"/>
+  </g>
+</svg>

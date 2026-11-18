@@ -698,3 +698,46 @@ input:disabled, textarea:disabled, .no-project .field-with-icon { cursor: defaul
 .set-field .select > .select-btn { height: 32px; padding: 0 30px 0 10px; font-size: var(--base-size); }
 .set-field .select::after { right: 10px; }
 .set-field .hint { margin-top: -2px; }
+
+/* ── 앱 업데이트(update.ts, Ramus 와 같은 배치): 제목·한 줄 설명, 그 아래 판마다 바뀐 내용(스크롤), 받는 동안의 진행 막대, [건너뛰기]……[나중에][업데이트]. */
+.modal.update { width: 560px; max-width: calc(100vw - 32px); max-height: calc(100vh - 48px); padding: 22px 24px 16px; border-radius: 8px; background: var(--git-bg); outline: none; }
+.modal-backdrop.leaving { opacity: 0; transition: opacity 260ms ease-out; }
+.modal-backdrop.leaving > .modal { transform: scale(0.965); transition: transform 260ms cubic-bezier(0.32, 0.72, 0, 1); }
+@media (prefers-reduced-motion: reduce) { .modal-backdrop.leaving, .modal-backdrop.leaving > .modal { transition: none; } }
+.update-head { margin-bottom: 14px; }
+.update-title { font-size: 18px; font-weight: 700; line-height: 1.3; color: var(--git-text-strong); }
+.update-sub { margin-top: 4px; color: var(--git-text-secondary); user-select: text; -webkit-user-select: text; }
+.update-label { margin-bottom: 6px; font-size: 12px; font-weight: 600; color: var(--git-text-muted); }
+.update-notes { flex: 0 1 auto; min-height: 0; max-height: 300px; overflow: auto; padding: 10px 12px; border: 1px solid var(--git-border); border-radius: var(--radius); background: var(--git-list-bg); user-select: text; -webkit-user-select: text; }
+.update-notes .muted { color: var(--git-text-muted); }
+.update-release + .update-release { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--git-divider); }
+.update-release-title { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; font-weight: 700; color: var(--git-text-strong); }
+.update-release-title .muted { font-weight: 400; font-size: 12px; color: var(--git-text-muted); }
+.update-status { margin-top: 12px; font-size: 12px; color: var(--git-text-secondary); }
+.update-bar { position: relative; height: 4px; margin-top: 6px; flex: none; overflow: hidden; border-radius: 2px; background: var(--git-hover); }
+.update-bar-fill { position: absolute; top: 0; bottom: 0; left: 0; width: 0; background: var(--git-accent); border-radius: 2px; transition: width 160ms linear; }
+.update-status[hidden], .update-bar[hidden] { display: none; }
+.update .modal-error { margin-top: 8px; color: var(--git-danger); font-size: 11px; white-space: pre-wrap; user-select: text; -webkit-user-select: text; }
+.update .modal-error:empty { display: none; }
+.update .modal-actions { display: flex; align-items: center; margin-top: 14px; }
+.update .modal-actions .spacer { flex: 1; }
+.update .modal-actions .btn { height: 28px; min-width: 88px; margin-left: 8px; padding: 0 14px; font-size: 12px; border-radius: 5px; }
+.update .modal-actions .btn.update-skip { margin-left: 0; }
+
+/* 변경 기록(마크다운) */
+.markdown { white-space: normal; line-height: 1.55; }
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown p, .markdown ul { margin: 0 0 8px; }
+.markdown h3 { margin: 8px 0 6px; font-size: 12px; font-weight: 700; line-height: 1.3; color: var(--git-text-secondary); }
+.markdown ul { padding-left: 20px; }
+.markdown li + li { margin-top: 2px; }
+.markdown a { color: var(--git-accent-fg); text-decoration: none; cursor: pointer; }
+.markdown a:hover { text-decoration: underline; }
+.markdown strong { font-weight: 700; color: var(--git-text-strong); }
+.markdown code { padding: 1px 4px; border-radius: 4px; background: var(--git-hover); font-family: var(--mono); font-size: 11px; }
+
+/* 설정 › 일반 › 업데이트 */
+.set-field .set-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.set-field .set-row .btn { height: 28px; }
+.set-field .set-row .grow { flex: 1; }

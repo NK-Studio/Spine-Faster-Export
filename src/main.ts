@@ -15,6 +15,8 @@ import { attachSuggestions, bindSegmented, enhanceSelects, selectHtml } from "./
 import { UNITY_ATLAS_EXT, UNITY_SKEL_EXT, openPackerDialog, packSummary, type PackSettings } from "./packer";
 import { LANG, resolveLang, t, type LangPref } from "./i18n";
 import { openSettingsDialog } from "./settings";
+import { createUpdater, loadUpdatePrefs, saveUpdatePrefs } from "./update";
+import { getVersion } from "@tauri-apps/api/app";
 
 // ───────────────────────────────────────── 타입
 
@@ -263,7 +265,7 @@ $("#app").innerHTML = `
 
 <footer class="footer">
   <span class="grow" id="foot-msg"></span>
-  <span class="ver">v0.2.1</span>
+  <span class="ver" id="app-ver"></span>
   <div class="foot-progress" id="progress"><i></i></div>
 </footer>
 
@@ -1376,12 +1378,14 @@ function showSettings() {
   // 다른 대화상자(팩 설정·덮어쓰기 확인 등)가 떠 있으면 그것부터 닫게 한다
   if ([...document.querySelectorAll(".modal-backdrop")].some((b) => !b.querySelector(".settings-modal"))) return;
   openSettingsDialog({
-    current: { theme: prefs.theme, lang: prefs.lang },
+    current: { theme: prefs.theme, lang: prefs.lang, updateAuto: loadUpdatePrefs().auto },
     busy: exporting || loading,
+    onCheckUpdate: () => void updater?.check(),
     onChange: (next) => {
       prefs.theme = next.theme;
       prefs.lang = next.lang;
       save("sfe.prefs", prefs);
+      saveUpdatePrefs({ auto: next.updateAuto });
       applyTheme();
       if (resolveLang(next.lang) === LANG) return;
       // 화면 문구는 처음 그릴 때 정해지므로 창을 다시 그린다. 열린 프로젝트·체크·검색어는 이어 간다.
@@ -1397,6 +1401,16 @@ function showSettings() {
   });
 }
 void listen("open-settings", showSettings);
+
+// ───────────────────────────────────────── 앱 업데이트(메뉴 › 업데이트 확인…, update.ts)
+
+let updater: ReturnType<typeof createUpdater> | null = null;
+void getVersion().then((version) => {
+  $("#app-ver").textContent = `v${version}`;
+  updater = createUpdater({ toast: (kind, title, sub) => toast(kind, title, sub), version, busy: () => exporting });
+  updater.start();
+});
+void listen("check-update", () => void updater?.check());
 // 메뉴 막대도 이 창의 언어로
 void invoke("set_menu_language", { lang: LANG }).catch(() => {});
 

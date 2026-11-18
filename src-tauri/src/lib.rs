@@ -8,8 +8,14 @@
 //! - `project_export_settings(options)`: 열린 `.spine` 에 저장된 마지막 내보내기 설정(없으면 null).
 //! - `take_pending_open()`: 앱을 켤 때 파인더/탐색기에서 넘겨받은 파일.
 //! - `set_menu_language(lang)`: 메뉴 막대를 그 언어(`ko`/`en`)로 다시 만든다.
+//! - `update_check()` / `update_install(version)`: 앱 업데이트(`updater.rs`). 내려받는 동안 `update-progress` 이벤트.
 //!
-//! 메뉴의 설정(맥: 앱 메뉴 > 설정…, 윈도우: 편집 > 환경설정…)을 누르면 `open-settings` 이벤트를 보낸다.
+//! 메뉴의 설정(맥: 앱 메뉴 > 설정…, 윈도우: 편집 > 환경설정…)을 누르면 `open-settings`,
+//! 업데이트 확인(맥: 앱 메뉴, 윈도우: 도움말)을 누르면 `check-update` 이벤트를 보낸다.
+
+mod lang;
+mod update;
+mod updater;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -202,6 +208,33 @@ fn save_export_settings(path: String, options: ExportOptions, input: Option<Stri
     std::fs::write(&path, text).map_err(|e| format!("저장할 수 없습니다: {e}"))
 }
 
+/// 새 판이 있는지 본다(`updater::check`). 네트워크를 쓰므로 UI 스레드 밖에서.
+#[tauri::command]
+async fn update_check() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(updater::check).await.map_err(|e| e.to_string())?
+}
+
+/// `version` 을 내려받아 설치를 시작하고, 잘 되면 앱을 끈다(도우미가 끝나기를 기다렸다가 바꿔 넣고 다시 띄운다).
+/// 받는 동안 `update-progress` 이벤트(`{received, total}`)를 보낸다.
+#[tauri::command]
+async fn update_install(app: AppHandle, version: String) -> Result<(), String> {
+    let cache = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    let progress_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        updater::install(&version, &cache, move |received, total| {
+            let _ = progress_app.emit("update-progress", serde_json::json!({ "received": received, "total": total }));
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    // 화면이 "다시 시작합니다" 를 그릴 틈을 조금 준다.
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        app.exit(0);
+    });
+    Ok(())
+}
+
 #[tauri::command]
 fn take_pending_open(state: State<'_, AppState>) -> Vec<String> {
     std::mem::take(&mut *state.pending_open.lock().unwrap())
@@ -246,6 +279,8 @@ struct MenuText {
     zoom: &'static str,
     close: &'static str,
     about: &'static str,
+    check_update: &'static str,
+    help: &'static str,
     services: &'static str,
     hide: &'static str,
     hide_others: &'static str,
@@ -267,6 +302,8 @@ const MENU_KO: MenuText = MenuText {
     zoom: "확대/축소",
     close: "윈도우 닫기",
     about: "Quick Spine 정보",
+    check_update: "업데이트 확인…",
+    help: "도움말",
     services: "서비스",
     hide: "Quick Spine 가리기",
     hide_others: "기타 가리기",
@@ -288,6 +325,8 @@ const MENU_EN: MenuText = MenuText {
     zoom: "Zoom",
     close: "Close Window",
     about: "About Quick Spine",
+    check_update: "Check for Updates…",
+    help: "Help",
     services: "Services",
     hide: "Hide Quick Spine",
     hide_others: "Hide Others",
@@ -295,14 +334,16 @@ const MENU_EN: MenuText = MenuText {
     quit: "Quit Quick Spine",
 };
 
-/// 메뉴 막대. 맥은 앱 메뉴에 «설정…»(⌘,), 윈도우·리눅스는 «편집» 메뉴에 «환경설정…»(Ctrl+,).
+/// 메뉴 막대. 맥은 앱 메뉴에 «업데이트 확인…»·«설정…»(⌘,), 윈도우·리눅스는 «편집» 메뉴에 «환경설정…»(Ctrl+,), «도움말» 메뉴에 «업데이트 확인…».
 fn build_menu<R: Runtime, M: Manager<R>>(app: &M, lang: &str) -> tauri::Result<Menu<R>> {
     let t = if lang == "en" { &MENU_EN } else { &MENU_KO };
     let settings = MenuItemBuilder::with_id("settings", t.settings).accelerator("CmdOrCtrl+,").build(app)?;
+    let check_update = MenuItemBuilder::with_id("check-update", t.check_update).build(app)?;
     #[cfg(target_os = "macos")]
     {
         let app_menu = SubmenuBuilder::new(app, "Quick Spine")
             .about_with_text(t.about, None)
+            .item(&check_update)
             .separator()
             .item(&settings)
             .separator()
@@ -342,12 +383,14 @@ fn build_menu<R: Runtime, M: Manager<R>>(app: &M, lang: &str) -> tauri::Result<M
             .separator()
             .item(&settings)
             .build()?;
-        MenuBuilder::new(app).items(&[&edit]).build()
+        let help = SubmenuBuilder::new(app, t.help).item(&check_update).build()?;
+        MenuBuilder::new(app).items(&[&edit, &help]).build()
     }
 }
 
 #[tauri::command]
 fn set_menu_language(app: AppHandle, lang: String) -> Result<(), String> {
+    lang::set(&lang);
     let menu = build_menu(&app, &lang).map_err(|e| e.to_string())?;
     app.set_menu(menu).map_err(|e| e.to_string())?;
     Ok(())
@@ -371,6 +414,8 @@ pub fn run() {
         .on_menu_event(|app, event| {
             if event.id() == "settings" {
                 let _ = app.emit("open-settings", ());
+            } else if event.id() == "check-update" {
+                let _ = app.emit("check-update", ());
             }
         })
         .setup(|app| {
@@ -381,7 +426,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![open_project, close_project, export_skeletons, existing_outputs, load_pack_settings, save_pack_settings, load_export_settings, save_export_settings, project_export_settings, take_pending_open, set_menu_language])
+        .invoke_handler(tauri::generate_handler![open_project, close_project, export_skeletons, existing_outputs, load_pack_settings, save_pack_settings, load_export_settings, save_export_settings, project_export_settings, take_pending_open, set_menu_language, update_check, update_install])
         .build(tauri::generate_context!())
         .expect("Tauri 앱을 만들 수 없습니다")
         .run(|_app, _event| {
