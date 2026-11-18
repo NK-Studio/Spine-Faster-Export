@@ -6,7 +6,8 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     // `spine-faster-export export …` · `list …` · `help`: 창 없이 명령줄로 동작한다.
     // 그 밖의 인수(윈도우 파일 연결로 들어온 .spine 경로 등)는 앱이 받는다.
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // args() 는 UTF-8 이 아닌 인수에서 panic 해 창도 명령줄도 뜨지 않는다. 그런 글자는 대체 문자로 바꿔 받는다
+    let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
     if args.first().is_some_and(|a| spine_export::cli::is_cli_command(a)) {
         #[cfg(windows)]
         attach_console();

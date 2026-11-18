@@ -146,7 +146,8 @@ fn display_name(p: &Path) -> String {
 }
 
 /// 내보내면 덮어쓸 파일 이름들(출력 폴더에 이미 있는 것).
-#[tauri::command]
+// 출력 폴더를 훑으므로(네트워크 드라이브·큰 Unity 폴더) UI 스레드가 아닌 곳에서 돌린다
+#[tauri::command(async)]
 fn existing_outputs(indices: Vec<usize>, out_dir: String, options: ExportOptions, state: State<'_, AppState>) -> Result<Vec<String>, String> {
     let loaded = current(&state)?;
     let files = spine_export::existing_outputs_for(&loaded.project, &loaded.path, &indices, &PathBuf::from(&out_dir), &options);
@@ -374,7 +375,7 @@ pub fn run() {
         })
         .setup(|app| {
             // 윈도우: 연결된 파일은 명령줄 인수로 들어온다.
-            let initial = args_paths(&std::env::args().collect::<Vec<_>>());
+            let initial = args_paths(&std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>());
             if !initial.is_empty() {
                 forward_open(app.handle(), initial);
             }
