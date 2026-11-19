@@ -2,6 +2,8 @@
 
 Spine 프로그램 없이 `.spine` 프로젝트에서 고른 스켈레톤만 런타임 파일(JSON · `.skel` · atlas)로 내보내는 데스크톱 앱입니다. Tauri 2 + Rust.
 
+<img width="1910" height="1270" alt="image" src="https://github.com/user-attachments/assets/d2f514aa-f18d-44f8-a4a8-7da3fe3da5d2" />
+
 - 지원 플랫폼: **Apple Silicon 맥(aarch64)**, **Windows(x64)**. 인텔 맥은 지원하지 않습니다.
 - 내보내기 코어는 Unity 패키지 `com.nkstudio.spine-event-injector` 의 C# 코어(`Editor/Core`)와 파이썬 PoC(`Tools~/export_poc`)를 Rust 로 옮긴 것입니다.
 
