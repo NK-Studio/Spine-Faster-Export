@@ -3,6 +3,28 @@
   "page": "https://quick-spine.bnm000215.workers.dev/",
   "releases": [
     {
+      "version": "0.3.1",
+      "date": "2026-11-19",
+      "notes": "### 변경\n- 앱 아이콘을 다시 바꿨습니다.",
+      "assets": {
+        "macos-arm64": {
+          "url": "https://github.com/NK-Studio/Spine-Faster-Export/releases/download/v0.3.1/QuickSpine-v0.3.1-macos-arm64.dmg",
+          "sha256": "d88d8a01b494ce562b8ba2d97f844f7edc05bde26770160c86159bd830154ddf",
+          "size": 8082026
+        },
+        "windows-x64-setup": {
+          "url": "https://github.com/NK-Studio/Spine-Faster-Export/releases/download/v0.3.1/QuickSpine-v0.3.1-windows-x64-setup.exe",
+          "sha256": "cb189985feab02eefb58b1b2bd8345fddd1a50ef8cfc8dd4bf5999435fb0e915",
+          "size": 6723551
+        },
+        "windows-x64-msi": {
+          "url": "https://github.com/NK-Studio/Spine-Faster-Export/releases/download/v0.3.1/QuickSpine-v0.3.1-windows-x64.msi",
+          "sha256": "2c7f0ccf63861d692ed99dbd05185251f772a4768f5e79b7cc027a4a3997d0c6",
+          "size": 8257536
+        }
+      }
+    },
+    {
       "version": "0.3.0",
       "date": "2026-11-18",
       "notes": "### 추가\n- 앱 안 업데이트: 켤 때와 그 뒤 6시간마다 새 버전을 확인하고, 새 버전 창에서 바뀐 내용을 보고 **업데이트하고 다시 시작** 으로 바로 바꿉니다. 메뉴의 «업데이트 확인…»(맥: 앱 메뉴, 윈도우: 도움말)과 설정 › 일반 › 업데이트(«새 버전이 나오면 알리기», «지금 확인»)에서도 됩니다.\n- 명령줄: 앱 실행 파일의 첫 인수가 `list` · `export` · `help` 이면 창 없이 명령줄로 동작합니다.\n- 팩 설정: 텍스처 아틀라스를 JPG 로(JPEG 품질), 배율별 리샘플링, Pretty print.\n- «이미지 폴더»로 묶을 때 폴더 안 `pack.json` 을 Spine 처럼 읽습니다.\n- 4.2 베타 형식(4.2.32-beta · 4.2.61-beta) 프로젝트를 엽니다.\n\n### 변경\n- 사각형·격자 배치, Auto scale, Alias 합치기, 메시 이미지 자르기, atlas 영역 순서를 Spine 과 같게 맞췄습니다.\n- 출력 파일을 임시 파일에 쓴 뒤 바꿔 넣습니다. 쓰다가 실패해도 이전 출력이 잘린 채 남지 않습니다.\n- 앱 아이콘을 새로 그렸습니다.\n\n### 고침\n- 한글 이름이 있으면 `.skel` 파일이 깨지던 것을 고쳤습니다.\n- 망가진 입력으로 앱이 죽던 것을 고쳤습니다. 한 스켈레톤이 실패해도 나머지는 끝까지 내보냅니다.",
